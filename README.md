@@ -44,6 +44,13 @@ footer) work; pure unit tests plus PTY integration tests verify the core contrac
 
 ## Install
 
+From [crates.io](https://crates.io/crates/cp-progress) (installs the `cprog` binary):
+
+```bash
+cargo install cp-progress --locked
+echo "alias cp='cprog'" >> ~/.bashrc && source ~/.bashrc   # ~/.zshrc for zsh
+```
+
 One-line install (builds + wires up the `cp` alias automatically, detects bash/zsh):
 
 ```bash

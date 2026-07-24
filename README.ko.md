@@ -40,6 +40,13 @@
 
 ## 설치
 
+[crates.io](https://crates.io/crates/cp-progress)에서 설치(‑ `cprog` 바이너리 설치):
+
+```bash
+cargo install cp-progress --locked
+echo "alias cp='cprog'" >> ~/.bashrc && source ~/.bashrc   # zsh면 ~/.zshrc
+```
+
 한 줄 설치(‑ 빌드 + `cp` alias 자동 설정, bash/zsh 감지):
 
 ```bash
