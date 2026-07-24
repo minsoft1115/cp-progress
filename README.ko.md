@@ -33,9 +33,9 @@
 |---|---|---|---|---|---|
 | 진짜 `cp`인가? | ✓ 진짜 cp를 옆에서 봄 | △ 패치된 cp 포크 | ✗ Rust 재구현 | ✗ 다른 도구 | ✓ 진짜 cp를 감쌈 |
 | 어떻게 실행하나 | 매번 **별도 명령**(`progress -mp …` / `watch progress`) | `advcp -g …`(패치 바이너리) | `cpx …`(새 명령) | `rsync -a --info=progress2 …` | **그냥 `cp …`**(alias) |
-| 설치 | 패키지 | **coreutils 재컴파일** | 패키지 | 패키지 | `cargo install`/한 줄 |
+| 설치 | 배포판 패키지 | **coreutils 재컴파일** | cargo install | 대개 기본 설치 | `cargo install`/한 줄 |
 | 최신 coreutils 추종 | 해당없음 | **뒤처짐**(최신 패치 9.7 vs cp 9.10) | 해당없음(자체 코드) | 해당없음 | 시스템 cp에 얹혀 항상 최신 |
-| cp 동작 바뀔 위험 | 없음 | 포크(옛 버전) | **재구현이라 다를 수 있음** | **rsync 의미론 다름** | 없음(byte-identical) |
+| cp 동작 바뀔 위험 | 없음 | 포크(옛 버전) | **재구현이라 다를 수 있음** | **rsync 의미론 다름** | 없음 — 진짜 cp를 그대로 실행 |
 | 진행바 정확도 | `pos` 기반(reflink/네트워크 약함) | 높음 | 높음 | 높음 | 근사·per-file |
 
 표 요약:

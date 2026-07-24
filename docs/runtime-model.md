@@ -26,6 +26,9 @@ RunPlan {
 - **`stdbuf`가 실행 가능** — `-v`를 실시간으로 흘리려면 `stdbuf -oL`이 필요하기 때문
   ([`capture-and-verbose.md`](./capture-and-verbose.md)). `cp` 버전이 아니라 `stdbuf` 가용성을
   feature-detect한다(‑ 실질 바닥은 coreutils 7.5). 없으면 managed를 포기한다.
+- **전경(foreground) 프로세스 그룹임** — `tcgetpgrp(stdout) == getpgrp()`. 백그라운드 작업
+  (`cprog … &`)은 터미널을 점거하면 안 되므로 managed를 포기하고 passthrough로 동작한다.
+  (‑ `tcgetpgrp`이 `ENOTTY`면 제어터미널이 아니어서 백그라운드 판정 불가 → 관대하게 허용.)
 
 하나라도 실패하면 **Passthrough**. 인자 검사 자체가 실패해도 보수적으로 passthrough.
 

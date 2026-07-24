@@ -13,6 +13,9 @@
 # Local scratch used by manual smoke tests
 /.smoke/
 
+# Local bug notes (tracked as GitHub issues instead)
+/bugs/
+
 # Editor / OS junk
 .vscode/
 .idea/

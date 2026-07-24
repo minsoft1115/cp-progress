@@ -35,9 +35,9 @@ does the progress cost you?**
 |---|---|---|---|---|---|
 | Still the real `cp`? | ✓ watches real cp | △ patched cp fork | ✗ Rust rewrite | ✗ different tool | ✓ wraps real cp |
 | How you invoke it | a **separate command** each time (`progress -mp …` / `watch progress`) | `advcp -g …` (patched binary) | `cpx …` (new command) | `rsync -a --info=progress2 …` | just `cp …` (alias) |
-| Install | package | **recompile coreutils** | package | package | `cargo install` / one-liner |
+| Install | distro package | **recompile coreutils** | cargo install | usually preinstalled | `cargo install` / one-liner |
 | Tracks latest coreutils | n/a | **lags** (newest patch is 9.7 vs coreutils 9.10) | n/a (own code) | n/a | rides system cp — always current |
-| Risk of changing cp's behavior | none | patched / old fork | **reimplementation may differ** | **rsync semantics differ** | none (byte-identical) |
+| Risk of changing cp's behavior | none | patched / old fork | **reimplementation may differ** | **rsync semantics differ** | none — runs your real cp |
 | Progress accuracy | `pos`-based (weak on reflink/network) | high | high | high | approximate, per-file |
 
 What the table says:

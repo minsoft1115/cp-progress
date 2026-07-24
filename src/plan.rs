@@ -24,6 +24,9 @@ pub struct Capabilities {
     pub linux_proc: bool,
     /// `stdbuf` is executable (required to stream `-v` live).
     pub stdbuf: bool,
+    /// We are the terminal's foreground process group (i.e. not a background job like
+    /// `cprog … &`). A background job must not draw the footer / take over the terminal.
+    pub foreground: bool,
 }
 
 /// The chosen run mode (docs/architecture.md).
@@ -45,7 +48,8 @@ pub fn decide(caps: &Capabilities, interactive: bool) -> RunMode {
         && caps.term_ok
         && !caps.ci
         && caps.linux_proc
-        && caps.stdbuf;
+        && caps.stdbuf
+        && caps.foreground;
 
     if managed {
         RunMode::ManagedTui
@@ -68,7 +72,16 @@ mod tests {
             ci: false,
             linux_proc: true,
             stdbuf: true,
+            foreground: true,
         }
+    }
+
+    #[test]
+    fn background_job_is_passthrough() {
+        // bug1: a backgrounded `cprog &` is not the terminal's foreground process group, so it
+        // must not enter the managed TUI (which would take over the terminal). -> passthrough.
+        let caps = Capabilities { foreground: false, ..managed_caps() };
+        assert_eq!(decide(&caps, false), RunMode::Passthrough);
     }
 
     #[test]
