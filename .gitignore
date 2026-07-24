@@ -1,0 +1,21 @@
+# Cargo build output
+/target/
+
+# Cargo.lock is intentionally committed — cprog is a binary crate and the installer runs
+# `cargo install --locked`, so the lockfile must be tracked. (Do NOT ignore it.)
+
+# rustfmt backups
+**/*.rs.bk
+
+# rustc/MSVC debug info
+*.pdb
+
+# Local scratch used by manual smoke tests
+/.smoke/
+
+# Editor / OS junk
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

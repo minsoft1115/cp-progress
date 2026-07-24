@@ -1,0 +1,286 @@
+//! Per-file progress model (docs/progress-model.md).
+//!
+//! Consumes `(t, done)` samples of the destination size and derives percent / rate / eta
+//! for the **current file only** (never a whole-job figure). rate/eta are smoothed over a
+//! short rolling window (~1s) so bursty I/O does not make the numbers jump.
+//!
+//! All values are `Option`: unknown-until-enough-samples and unknown-size stay explicit
+//! rather than showing a fake 100% or a wild rate (docs/ui.md invariant 5).
+
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+/// Default rolling-window length for rate/eta smoothing (docs/progress-model.md "~1s").
+pub const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(1);
+
+/// Current-file percentage in `0..=100` from `done`/`total`, or `None` when the total is
+/// unknown (indeterminate). Empty source (total 0) reads as complete; overshoot clamps to
+/// 100. Shared by [`ProgressModel::percent`] and the footer renderer so the A5/A6 rules
+/// (docs/testing.md) live in exactly one place.
+pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
+    match total {
+        None => None,
+        Some(0) => Some(100.0),                    // A5: complete, and no divide-by-zero
+        Some(total) => Some((done as f64 / total as f64 * 100.0).clamp(0.0, 100.0)), // A6 clamp
+    }
+}
+
+/// Snapshot of the current file's progress, consumed by the footer renderer
+/// (docs/architecture.md "핵심 타입"). Carries raw `done`/`total`; percent is derived by the
+/// model (see [`ProgressModel::percent`]) so overshoot/empty-source handling stays in one place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressState {
+    /// Current file name (basename; captured for diagnostics, not shown in the footer — the
+    /// `cp -v` line above already names the file).
+    pub name: String,
+    /// Source size in bytes; `None` when unknown -> indeterminate bar.
+    pub total: Option<u64>,
+    /// Bytes landed so far (destination size), raw and unclamped.
+    pub done: u64,
+    /// Smoothed throughput in bytes/sec; `None` until enough samples.
+    pub rate: Option<f64>,
+    /// Estimated time remaining for this file; `None` when unknown.
+    pub eta: Option<Duration>,
+}
+
+/// Rolling-window model over `(t, done)` samples of the destination size.
+#[derive(Debug)]
+pub struct ProgressModel {
+    total: Option<u64>,
+    window: Duration,
+    /// `(time, done)` samples, oldest first. Bounded to roughly one window (plus one anchor).
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl ProgressModel {
+    /// Create a model for a file of size `total` (None if unknown), smoothing over `window`.
+    pub fn new(total: Option<u64>, window: Duration) -> Self {
+        Self { total, window, samples: VecDeque::new() }
+    }
+
+    /// Record a destination-size sample. Evicts samples that have aged out of the window,
+    /// keeping at most one anchor just outside it so the window stays fully covered.
+    pub fn push(&mut self, now: Instant, done: u64) {
+        self.samples.push_back((now, done));
+        // Drop a front sample only while the next one is already at/older than the window,
+        // i.e. the front is redundant for covering `[now - window, now]`.
+        while self.samples.len() >= 2 {
+            let second = self.samples[1].0;
+            if now.saturating_duration_since(second) >= self.window {
+                self.samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Bytes landed so far (last sample), or 0 if no sample yet.
+    pub fn done(&self) -> u64 {
+        self.samples.back().map(|&(_, d)| d).unwrap_or(0)
+    }
+
+    /// Current-file percentage in `0..=100`, or `None` when the total is unknown
+    /// (indeterminate). Empty source (total 0) reads as complete; overshoot clamps to 100.
+    pub fn percent(&self) -> Option<f64> {
+        percent_of(self.done(), self.total)
+    }
+
+    /// Smoothed throughput (bytes/sec) across the window, or `None` with fewer than two
+    /// samples or a zero time span. A flat or negative delta yields exactly `0.0` (A7).
+    pub fn rate(&self) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let (t0, d0) = *self.samples.front().unwrap();
+        let (t1, d1) = *self.samples.back().unwrap();
+        let span = t1.saturating_duration_since(t0).as_secs_f64();
+        if span <= 0.0 {
+            return None;
+        }
+        let delta = d1.saturating_sub(d0) as f64; // negative deltas floor at 0 -> rate 0
+        Some(delta / span)
+    }
+
+    /// Estimated time remaining for the current file, or `None` when unknown. Returns
+    /// `Duration::ZERO` once done reaches total; needs a known total and a positive rate.
+    pub fn eta(&self) -> Option<Duration> {
+        let total = self.total?;
+        let remaining = total.saturating_sub(self.done());
+        if remaining == 0 {
+            return Some(Duration::ZERO);
+        }
+        let rate = self.rate()?;
+        if rate <= 0.0 {
+            return None; // A7: no forward progress -> eta unknown
+        }
+        // try_from_secs_f64 rejects non-finite/overflowing durations instead of panicking.
+        Duration::try_from_secs_f64(remaining as f64 / rate).ok()
+    }
+
+    /// Build a [`ProgressState`] snapshot for the current file named `name`.
+    pub fn snapshot(&self, name: impl Into<String>) -> ProgressState {
+        ProgressState {
+            name: name.into(),
+            total: self.total,
+            done: self.done(),
+            rate: self.rate(),
+            eta: self.eta(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    const WINDOW: Duration = Duration::from_secs(1);
+
+    fn model(total: Option<u64>) -> ProgressModel {
+        ProgressModel::new(total, WINDOW)
+    }
+
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    // ---- percent (A5 / A6, indeterminate) --------------------------------------------
+
+    #[test]
+    fn percent_basic_ratio() {
+        let mut m = model(Some(200));
+        m.push(Instant::now(), 50);
+        assert!(approx(m.percent().unwrap(), 25.0));
+    }
+
+    #[test]
+    fn percent_empty_source_is_complete_not_divide_by_zero() {
+        // docs/testing.md A5: total 0 (empty source) must not divide by zero.
+        let mut m = model(Some(0));
+        m.push(Instant::now(), 0);
+        assert!(approx(m.percent().unwrap(), 100.0));
+    }
+
+    #[test]
+    fn percent_overshoot_clamps_to_100() {
+        // docs/testing.md A6: done > total clamps to 100.
+        let mut m = model(Some(100));
+        m.push(Instant::now(), 150);
+        assert!(approx(m.percent().unwrap(), 100.0));
+    }
+
+    #[test]
+    fn percent_unknown_total_is_indeterminate() {
+        let mut m = model(None);
+        m.push(Instant::now(), 50);
+        assert_eq!(m.percent(), None);
+    }
+
+    // ---- rate ------------------------------------------------------------------------
+
+    #[test]
+    fn rate_unknown_before_two_samples() {
+        let mut m = model(Some(1000));
+        assert_eq!(m.rate(), None);
+        m.push(Instant::now(), 100);
+        assert_eq!(m.rate(), None, "one sample is not enough");
+    }
+
+    #[test]
+    fn rate_over_window() {
+        let mut m = model(Some(10_000));
+        let t0 = Instant::now();
+        m.push(t0, 0);
+        m.push(t0 + Duration::from_secs(1), 100);
+        assert!(approx(m.rate().unwrap(), 100.0), "100 bytes in 1s = 100 B/s");
+    }
+
+    #[test]
+    fn rate_zero_when_no_increase() {
+        // docs/testing.md A7: no increase between samples -> rate ~= 0.
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 200);
+        m.push(t0 + Duration::from_secs(1), 200);
+        assert!(approx(m.rate().unwrap(), 0.0));
+        assert_eq!(m.eta(), None, "no progress -> eta unknown");
+    }
+
+    #[test]
+    fn rate_zero_when_negative_increase() {
+        // docs/testing.md A7: a negative delta is floored at 0, never a negative rate.
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 200);
+        m.push(t0 + Duration::from_secs(1), 150);
+        assert!(approx(m.rate().unwrap(), 0.0));
+    }
+
+    #[test]
+    fn rate_reflects_recent_window_after_eviction() {
+        let mut m = model(Some(10_000));
+        let t0 = Instant::now();
+        m.push(t0, 0);
+        m.push(t0 + Duration::from_millis(500), 50);
+        m.push(t0 + Duration::from_secs(1), 100);
+        m.push(t0 + Duration::from_secs(2), 300); // old slow samples fall out of the window
+        assert!(approx(m.rate().unwrap(), 200.0), "recent 1s: 100->300 = 200 B/s");
+    }
+
+    // ---- eta -------------------------------------------------------------------------
+
+    #[test]
+    fn eta_from_remaining_over_rate() {
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0 + Duration::from_secs(1), 200); // rate 100 B/s, done 200, remaining 800
+        assert_eq!(m.eta(), Some(Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn eta_unknown_when_rate_unknown() {
+        let mut m = model(Some(1000));
+        m.push(Instant::now(), 100); // only one sample -> rate None
+        assert_eq!(m.eta(), None);
+    }
+
+    #[test]
+    fn eta_unknown_when_total_unknown() {
+        let mut m = model(None);
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0 + Duration::from_secs(1), 200);
+        assert_eq!(m.eta(), None);
+    }
+
+    #[test]
+    fn eta_zero_when_complete() {
+        let mut m = model(Some(200));
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0 + Duration::from_secs(1), 200); // done == total
+        assert_eq!(m.eta(), Some(Duration::ZERO));
+    }
+
+    // ---- snapshot DTO ----------------------------------------------------------------
+
+    #[test]
+    fn snapshot_builds_progress_state() {
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0 + Duration::from_secs(1), 200);
+        let s = m.snapshot("a.iso");
+        assert_eq!(s.name, "a.iso");
+        assert_eq!(s.total, Some(1000));
+        assert_eq!(s.done, 200);
+        assert!(approx(s.rate.unwrap(), 100.0));
+        assert_eq!(s.eta, Some(Duration::from_secs(8)));
+    }
+
+    #[test]
+    fn default_rate_window_is_one_second() {
+        assert_eq!(DEFAULT_RATE_WINDOW, Duration::from_secs(1));
+    }
+}

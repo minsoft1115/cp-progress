@@ -1,0 +1,44 @@
+[package]
+name = "cp-progress"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Linux-only progress wrapper around the system cp"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/minsoft1115/cp-progress"
+keywords = ["cp", "progress", "cli", "coreutils", "terminal"]
+categories = ["command-line-utilities"]
+authors = ["Lee Minhyuk"]
+
+[[bin]]
+name = "cprog"
+path = "src/main.rs"
+
+[lib]
+name = "cprog"
+path = "src/lib.rs"
+
+[dependencies]
+# Same-terminal fstat (st_dev/ino), ioctl(TIOCGWINSZ), signal (sigaction/self-raise),
+# prctl(PR_SET_PDEATHSIG). See docs/dependencies.md.
+libc = "0.2"
+# Minimal interactive/-v detection and value-consuming option handling in args.rs.
+lexopt = "0.3"
+# Display-width truncation for footer file names (wide/CJK safe).
+unicode-width = "0.2"
+# Async-signal-safe SIGWINCH flag registration (self-raise on exit stays on libc).
+signal-hook = "0.3"
+
+[dev-dependencies]
+# PTY-based integration harness (openpty) and waitpid. Runtime never uses PTY.
+nix = { version = "0.30", features = ["term", "process", "signal", "fs"] }
+# Integration tests only: TIOCSWINSZ to resize a PTY (nix has no wrapper for it).
+libc = "0.2"
+
+# Fault-injection seams compiled only under this feature (off by default, absent in release).
+[features]
+test-hooks = []
+# Integration tests (real cp/stdbuf + PTY) are gated so the default `cargo test` stays pure
+# (no external tools), per docs/testing.md. Run them with `cargo test --features integration`.
+integration = []
