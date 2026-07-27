@@ -113,8 +113,7 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
         })
     }
 
-    /// Discard the current file's timing history while keeping its identity, `total` and
-    /// [`Basis`].
+    /// Discard the current file's timing history while keeping its identity and `total`.
     ///
     /// Called after a job-control stop: `cp` was stopped alongside cprog, so the wall-clock span
     /// across the suspend carries no throughput information and would otherwise be smoothed in as
@@ -524,7 +523,7 @@ mod tests {
     #[test]
     fn idle_then_a_new_file_starts_a_fresh_model() {
         // After Idle the sampler holds no per-file state, so the next file is established from
-        // scratch (fresh total and basis) rather than continuing the finished one.
+        // scratch (a fresh total) rather than continuing the finished one.
         let proc = FakeProc::new(file("/dst/a", Some("/src/a")));
         let stat = FakeStat::default();
         stat.set("/src/a", Ok(FileStat { size: 1000 }));

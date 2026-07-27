@@ -39,7 +39,7 @@
 
 - **TTY 판정** → `std::io::IsTerminal`(1.70+)
 - **`/proc` 읽기** → `std::fs::read_dir` / `read_link`(‑ fd 대상 경로), `std::fs::metadata`
-- **대상 파일의 `st_size` / `st_blocks`(‑ 경로 stat)** → `std::os::unix::fs::MetadataExt`
+- **대상 파일의 `st_size`(‑ 경로 stat)** → `std::os::unix::fs::MetadataExt`
   - 단, stdout/stderr **fd**의 `st_dev`·`st_ino`로 "같은 터미널"을 판정하는 건 fd를 소유하지
     않고 fstat해야 하므로 `libc::fstat`을 쓴다(위 libc 참조).
 - **`cp`/`stdbuf` 실행** → `std::process::Command`
