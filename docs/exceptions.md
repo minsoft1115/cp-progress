@@ -52,7 +52,7 @@
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
 | A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않음 → cprog와 cp 모두 기본 동작(전경 그룹 전체가 함께 죽음) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
 | A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). 자식은 `std::process::Command`가 기본 disposition을 복원해 `cp`가 정상적으로 SIGPIPE에 반응 | 🟡 `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
-| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](#a8-note) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
+| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](./process-model.md#정리-cleanup) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
 
 ## Ctrl-Z / job control
 
@@ -87,7 +87,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B9 | **`cprog a b &`** (백그라운드 실행) | `tcgetpgrp(stdout) != getpgrp()` → `foreground=false` → passthrough. 백그라운드 작업이 터미널을 점거하면 안 되므로 | ✅ `term::is_foreground`, `tests/background.rs` (bug1 / #1) |
 | B10 | **`tcgetpgrp`이 `ENOTTY`** (제어터미널 아님) | 백그라운드임을 **증명할 수 없으므로 관대하게 허용**(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 정상 감지됨 | 🟡 `term::is_foreground` |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
-| B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_without_summary` |
+| B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_but_names_cprog` |
 | B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄) | ✅ `args.rs::missing_required_value_is_scan_error` |
 | B14 | **`sudo cprog` / setuid `cp`** | `stdbuf`는 `LD_PRELOAD` 기반이라 setuid 바이너리에선 무시됨. cp가 setuid인 극히 드문 환경에서는 라이브성이 degrade | 📄 `capture-and-verbose.md` |
 | B15 | **모드는 실행 전에 한 번만 결정** | 실행 중 파이프/TTY 상태가 바뀌어도 모드는 안 바뀐다(단순화). 유일한 런타임 재확인은 A10의 전경 여부 | 📄 `runtime-model.md` |

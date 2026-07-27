@@ -148,7 +148,7 @@
 | D3 | `cprog`가 직접 시그널(Ctrl-C) 받음 | footer 정리 + 같은 시그널 재현 | 통합 |
 | D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛/통합 |
 | D5 | 인자 없음 | `Fatal::Usage`, exit 1 | 유닛 |
-| D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_line`) + 통합(PTY/비-TTY 양쪽) |
+| D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_notice`) + 통합(PTY/비-TTY 양쪽) |
 | D6 | `cp` 정상 exit code n | 그대로 n 반환 | 유닛 + 통합 |
 | D7 | `stdbuf`가 `cp`를 exec | PID 안정 → `/proc/<pid>/fd` 유효 | 통합 |
 
