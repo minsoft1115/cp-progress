@@ -313,7 +313,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                     progress_shown |= footer.is_some();
                     let _ = match footer {
                         // Withheld while an unterminated log line is on screen, so the periodic
-                        // redraw cannot clobber it either (#4, docs/ui.md invariant 10).
+                        // redraw cannot clobber it either (#4, docs/ui.md invariant 11).
                         Some(f) => guard.draw_unless_line_pending(&f.rows()),
                         None => guard.erase(),
                     };

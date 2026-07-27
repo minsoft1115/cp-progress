@@ -32,7 +32,7 @@ pub struct FooterGuard<W: Write> {
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
     /// Whether the last log bytes written left an unterminated line on screen (docs/ui.md
-    /// invariant 10). While true the footer is withheld — see [`Self::line_pending`].
+    /// invariant 11). While true the footer is withheld — see [`Self::line_pending`].
     line_pending: bool,
 }
 
@@ -129,7 +129,7 @@ impl<W: Write> FooterGuard<W> {
         self.w.flush()
     }
 
-    /// Draw the footer unless an unterminated log line is on screen (docs/ui.md invariant 10).
+    /// Draw the footer unless an unterminated log line is on screen (docs/ui.md invariant 11).
     /// This is what the render loop's idle tick should call; [`Self::draw`] stays the primitive.
     pub fn draw_unless_line_pending(&mut self, rows: &[&str]) -> io::Result<()> {
         if self.line_pending {
@@ -154,7 +154,7 @@ impl<W: Write> FooterGuard<W> {
     ///
     /// If the bytes do not end on a line boundary the footer is withheld, because drawing it
     /// would overwrite the partial line and the next erase would take it off screen entirely
-    /// (docs/ui.md invariant 10). It comes back with the write that completes the line.
+    /// (docs/ui.md invariant 11). It comes back with the write that completes the line.
     /// Taking an iterator rather than a slice keeps the caller from having to materialise one.
     pub fn write_log_chunks<'a>(
         &mut self,
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn partial_log_line_withholds_the_footer() {
-        // #4 / docs/ui.md invariant 10: bytes not ending in a newline leave a partial line on
+        // #4 / docs/ui.md invariant 11: bytes not ending in a newline leave a partial line on
         // screen. Drawing the footer would `\r` over it and the next erase would wipe it, so the
         // footer is withheld until the line is finished.
         let buf = SharedBuf::default();
