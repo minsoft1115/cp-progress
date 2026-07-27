@@ -3,14 +3,14 @@
 [English](README.md) | **한국어**
 
 `cprog`는 시스템 `cp`를 감싸는 얇은 래퍼다. **리눅스 대화형 터미널에서만** per-file 진행바를
-얹고(‑ 진행바 기능은 `/proc`가 있는 리눅스 전용), 그 외 모든 곳 — 파이프·비-TTY·CI·비-리눅스 —
-에서는 **투명하게 `cp`와 바이트 동일**하게 동작한다. 진짜 `cp`를 그대로 실행하고, `cp -v`
+얹고(‑ 진행바 기능은 `/proc`가 있는 리눅스 전용), footer가 안전하지 않은 곳 — 파이프·리다이렉트·
+CI·비-리눅스·백그라운드 작업 — 에서는 **투명하게 `cp`와 바이트 동일**하게 동작한다. 진짜 `cp`를 그대로 실행하고, `cp -v`
 출력을 위로 흘려주며, **오래 걸리는 파일에 대해서만** 하단 footer에 진행바를 그렸다가 끝나면
 없앤다. 외부 `progress` 명령도, hidden PTY도, 화면 스크래핑도 없다.
 
 ```
   'a.iso' -> '/mnt/backup/a.iso'
-  ████████░░░░  62.34 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
+  ████████████░░░░░░░░   62.33 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
 ```
 
 ## 무엇인가
@@ -19,7 +19,10 @@
 - managed 모드에서 `-v`를 주입·캡처해 로그를 위로 흘려주고(‑ 그 스크롤이 "살아있다"는
   신호), 한 파일이 느려지면 `/proc/<pid>/fd`로 찾아 `stat`으로 커지는 크기를 읽어 **자체
   진행바**를 그린다.
-- footer가 안전하지 않은 곳(파이프/비-TTY/CI/비-리눅스)에서는 `cp`와 바이트 동일.
+- footer가 안전하지 않은 곳에서는 passthrough로 내려간다 — 스트림 inherit, env 미변경,
+  **`cp`와 바이트 동일**. 해당 조건: stdout/stderr가 TTY가 아님(파이프·리다이렉트), 둘이 서로
+  다른 터미널, `TERM` 미설정 또는 `dumb`, `CI` 설정됨, 비-리눅스, `stdbuf` 없음,
+  백그라운드 작업(`cprog … &`), interactive 플래그(`-i`), `--help`/`--version`.
 
 외부 진행률 도구·hidden PTY·화면 스크래핑 없이, `cp` 자신의 `-v` 타이밍과 커널의 `/proc`/`stat`
 만으로 진행을 자체 계산한다.
@@ -53,15 +56,28 @@
 
 - **파일 개수는 안 센다** — "파일만" 세려면 항목마다 `stat`이 필요해 대량 소파일에서 성능이
   떨어지기 때문. `-v`는 활동표시 + 느린 파일 타이밍으로만 쓰고, **내용은 파싱하지 않는다.**
-- 진행은 `fdinfo: pos`가 아니라 **대상 파일 크기(`stat().st_size`)** 로 잰다 —
-  coreutils 9.x의 `copy_file_range`에서는 `pos`가 0으로 남기 때문이다.
+- 진행은 `fdinfo: pos`가 아니라 **대상 파일의 크기**로 잰다 — coreutils 9.x의
+  `copy_file_range`에서는 `pos`가 복사 내내 0으로 남기 때문이다.
+- 다만 **어느 크기로 재는지는 파일마다 한 번 정한다**: 기본은 `st_size`, 선할당 대상이 확실히
+  확인될 때만 `st_blocks * 512`. 두 값은 서로 반대 방향으로 어긋난다 — 선할당된 파일은 처음부터
+  `st_size`가 full이고, 반대로 **sparse 대상**(원본에 hole이 있으면 `cp`가 기본값
+  `--sparse=auto`로 만든다)은 블록 수가 길이보다 훨씬 적은 게 정상이다.
+  자세한 내용은 [`docs/progress-model.md`](./docs/progress-model.md).
 
 ## 상태
 
 **구현됨 (test-first).** docs-first로 설계를 [`docs/`](./docs)에 확정한 뒤, 그 스펙을 TDD로
 구현했다. passthrough(cp와 바이트 동일)와 managed TUI(라이브 footer) 양쪽이 동작하며, 순수
 유닛 + PTY 통합 테스트로 핵심 계약(cp 결과·시그널 보존, byte-identical 폴백, 라이브 스트리밍)을
-검증한다. `cargo test`로 전체 스위트 실행.
+검증한다.
+
+```bash
+cargo test                          # 유닛 스위트 — 외부 도구 없이 항상 green
+cargo test --features integration   # 진짜 cp/stdbuf를 쓰는 PTY 테스트까지
+```
+
+통합 테스트는 기본 `cargo test`가 외부 도구에 의존하지 않도록 **일부러 feature로 게이트**돼
+있다. 변경을 신뢰하려면 둘 다 돌려야 한다.
 
 ## 설치
 
@@ -102,7 +118,9 @@ cp big.iso /mnt/backup/big.iso   # 느려지면 진행바가 뜬다
 - [개요](./docs/overview.md) · [UI](./docs/ui.md) · [Capture & Verbose](./docs/capture-and-verbose.md)
 - [Progress model](./docs/progress-model.md) · [Runtime model](./docs/runtime-model.md)
 - [Architecture](./docs/architecture.md) · [Process model](./docs/process-model.md)
-- [Testing](./docs/testing.md) · [Usage](./docs/usage.md)
+- [Testing](./docs/testing.md) · [Usage](./docs/usage.md) · [Dependencies](./docs/dependencies.md)
+- [Exceptions](./docs/exceptions.md) — 런타임 예외 전수(시그널·Ctrl-Z·passthrough 조건·진행
+  계산 한계)와 각각에 대한 동작, 그리고 어디서 테스트되는지
 
 ## 요구사항
 
@@ -110,3 +128,20 @@ cp big.iso /mnt/backup/big.iso   # 느려지면 진행바가 뜬다
 - **진행바를 보려면:** 리눅스(‑ `/proc` 필요) + 대화형 터미널 + `stdbuf`(coreutils, `cp -v`를
   실시간으로 흘리기 위해). 이 중 하나라도 없으면 자동으로 passthrough(‑ `cp`와 바이트 동일)로
   동작하며, 그래도 복사는 정상이다.
+
+## 조정 (환경변수)
+
+전부 선택이고 안전한 기본값이 있다. 값이 숫자가 아니면 **조용히 기본값으로 폴백**한다.
+
+| 변수 | 효과 |
+|---|---|
+| `CPROG_SLOW_THRESHOLD_MS` | 한 파일이 이만큼 넘게 걸리면 바가 뜬다 (기본 100) |
+| `CPROG_SAMPLE_INTERVAL_MS` | 느린 파일일 때 `stat` 폴링 주기 (기본 100) |
+| `CPROG_RENDER_TICK_MS` | footer 리드로우 tick (기본 125) |
+| `NO_COLOR` | footer 색 끔 (설정만 돼 있으면 값 무관) |
+
+자세한 설명은 [`docs/usage.md`](./docs/usage.md).
+
+## 라이선스
+
+[MIT](./LICENSE)

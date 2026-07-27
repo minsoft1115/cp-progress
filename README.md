@@ -3,15 +3,15 @@
 **English** | [한국어](README.ko.md)
 
 `cprog` is a thin wrapper around the system `cp`. It overlays a per-file progress bar **only in a
-Linux interactive terminal** (the progress feature is Linux-only, needing `/proc`); everywhere
-else — pipes, non-TTY, CI, non-Linux — it behaves **transparently, byte-for-byte identical to
-`cp`**. It runs the real `cp`, relays `cp -v` output above, and draws a footer progress bar
+Linux interactive terminal** (the progress feature is Linux-only, needing `/proc`); anywhere a
+footer would not be safe — a pipe, a redirect, CI, non-Linux, a background job — it behaves
+**transparently, byte-for-byte identical to `cp`**. It runs the real `cp`, relays `cp -v` output above, and draws a footer progress bar
 **only for files that take a while**, erasing it when done. No external `progress` command, no
 hidden PTY, no screen-scraping.
 
 ```
   'a.iso' -> '/mnt/backup/a.iso'
-  ████████░░░░  62.34 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
+  ████████████░░░░░░░░   62.33 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
 ```
 
 ## What it is
@@ -21,7 +21,11 @@ hidden PTY, no screen-scraping.
 - In managed mode it injects and captures `-v` to relay the log above (that scrolling is the
   "it's alive" signal); when a single file gets slow, it locates it via `/proc/<pid>/fd` and
   reads the growing size with `stat` to draw its **own progress bar**.
-- Where a footer isn't safe (pipe / non-TTY / CI / non-Linux), it is byte-identical to `cp`.
+- Where a footer isn't safe it falls back to passthrough — streams inherited, environment
+  untouched, **byte-identical to `cp`**. That covers: stdout or stderr not a TTY (a pipe or a
+  redirect), the two not on the same terminal, `TERM` unset or `dumb`, `CI` set, non-Linux,
+  `stdbuf` missing, a background job (`cprog … &`), an interactive flag (`-i`), and
+  `--help`/`--version`.
 
 It computes progress itself from `cp`'s own `-v` timing and the kernel's `/proc`/`stat` — no
 external progress tool, no hidden PTY, no screen-scraping.
@@ -59,16 +63,28 @@ appears in a Linux interactive terminal with `stdbuf`; for raw bar accuracy, `ad
 - **It does not count files** — counting "files only" would need a `stat` per entry, hurting
   performance on many small files. `-v` is used only as an activity signal and for slow-file
   timing; its **contents are never parsed**.
-- Progress is measured by the **destination file size (`stat().st_size`)**, not `fdinfo: pos` —
-  because with coreutils 9.x's `copy_file_range`, `pos` stays 0.
+- Progress is measured from the **destination file's size**, not `fdinfo: pos` — because with
+  coreutils 9.x's `copy_file_range`, `pos` stays 0 for the whole copy.
+- Which size, though, is decided **once per file**: `st_size` by default, `st_blocks * 512` only
+  when a preallocated destination is positively identified. The two fail in opposite directions —
+  a preallocated file has its full `st_size` from the start, while a **sparse** destination (which
+  `cp` produces by default via `--sparse=auto` whenever the source has holes) legitimately has far
+  fewer blocks than its length. See [`docs/progress-model.md`](./docs/progress-model.md).
 
 ## Status
 
 **Implemented (test-first).** The design was fixed docs-first in [`docs/`](./docs), then built
 from that spec with TDD. Both passthrough (byte-identical to `cp`) and the managed TUI (live
 footer) work; pure unit tests plus PTY integration tests verify the core contracts (preserving
-`cp`'s result and signals, byte-identical fallback, live streaming). Run the full suite with
-`cargo test`.
+`cp`'s result and signals, byte-identical fallback, live streaming).
+
+```bash
+cargo test                          # unit suite — needs no external tools, always green
+cargo test --features integration   # adds the PTY tests driving a real cp / stdbuf
+```
+
+The integration tests are feature-gated on purpose so the default `cargo test` stays free of
+external dependencies; run both before trusting a change.
 
 ## Install
 
@@ -112,7 +128,9 @@ cp big.iso /mnt/backup/big.iso   # a progress bar appears if it gets slow
 - [Overview](./docs/overview.md) · [UI](./docs/ui.md) · [Capture & Verbose](./docs/capture-and-verbose.md)
 - [Progress model](./docs/progress-model.md) · [Runtime model](./docs/runtime-model.md)
 - [Architecture](./docs/architecture.md) · [Process model](./docs/process-model.md)
-- [Testing](./docs/testing.md) · [Usage](./docs/usage.md)
+- [Testing](./docs/testing.md) · [Usage](./docs/usage.md) · [Dependencies](./docs/dependencies.md)
+- [Exceptions](./docs/exceptions.md) — every runtime exception (signals, Ctrl-Z, passthrough
+  triggers, progress limits), what cprog does about each, and where it is tested
 
 ## Requirements
 
@@ -120,3 +138,20 @@ cp big.iso /mnt/backup/big.iso   # a progress bar appears if it gets slow
 - **To see the progress bar:** Linux (needs `/proc`) + an interactive terminal + `stdbuf`
   (coreutils, to stream `cp -v` live). If any of these is missing, cprog automatically runs as
   passthrough (byte-identical to `cp`), and the copy still works normally.
+
+## Tuning
+
+All optional, all with safe defaults; an unparsable value silently falls back to the default.
+
+| Variable | Effect |
+|---|---|
+| `CPROG_SLOW_THRESHOLD_MS` | How long one file must take before its bar appears (default 100) |
+| `CPROG_SAMPLE_INTERVAL_MS` | `stat` polling interval while a file is slow (default 100) |
+| `CPROG_RENDER_TICK_MS` | Footer redraw tick (default 125) |
+| `NO_COLOR` | Disables footer colour (any value) |
+
+Full description in [`docs/usage.md`](./docs/usage.md).
+
+## License
+
+[MIT](./LICENSE)
