@@ -40,15 +40,15 @@ does the progress cost you?**
 | Still the real `cp`? | ✓ watches real cp | △ patched cp fork | ✗ Rust rewrite | ✗ different tool | ✓ wraps real cp |
 | How you invoke it | a **separate command** each time (`progress -mp …` / `watch progress`) | `advcp -g …` (patched binary) | `cpx …` (new command) | `rsync -a --info=progress2 …` | just `cp …` (alias) |
 | Install | distro package | **recompile coreutils** | cargo install | usually preinstalled | `cargo install` / one-liner |
-| Tracks latest coreutils | n/a | **lags** (newest patch is 9.7 vs coreutils 9.10) | n/a (own code) | n/a | rides system cp — always current |
+| Tracks latest coreutils | n/a | **lags** — every coreutils release needs the patch re-ported | n/a (own code) | n/a | rides system cp — always current |
 | Risk of changing cp's behavior | none | patched / old fork | **reimplementation may differ** | **rsync semantics differ** | none — runs your real cp |
 | Progress accuracy | `pos`-based (weak on reflink/network) | high | high | high | approximate, per-file |
 
 What the table says:
 
 - **`progress`** — real cp, but every copy needs an **extra command**; it isn't integrated.
-- **`advcpmv`** — *is* cp, but a **recompiled fork that lags upstream**: its newest patch targets
-  coreutils 9.7 while releases are already at 9.10+.
+- **`advcpmv`** — *is* cp, but a **recompiled fork that lags upstream by construction**: the patch
+  has to be re-ported to each new coreutils release, so a gap is structural rather than incidental.
 - **`cpx` / `rsync`** — **not `cp`** at all (a reimplementation / a different tool), so behavior
   can differ (`rsync`'s trailing-slash rule and attribute defaults especially).
 - **cprog** — it's **just `cp` with a progress bar**: light install, always the current system
