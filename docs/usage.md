@@ -64,6 +64,21 @@ cprog -i big.iso backup.iso
 - 시그널(Ctrl-C 등): `cp`의 signaled-exit 의미론 보존, 요약 없음.
 - `cprog` 쪽 문제(샘플/렌더/정리): 경고까지만 — exit code는 언제나 `cp`에서.
 
+## cprog 버전 확인
+
+`cprog`는 자체 옵션이 없어 `--version`도 `cp`에 그대로 전달된다. 대신 **대화형 터미널에서는**
+`cp` 출력 뒤에 cprog 버전 한 줄이 stderr로 덧붙는다:
+
+```bash
+$ cp --version
+cp (GNU coreutils) 9.11
+...
+cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
+```
+
+파이프·리다이렉트·스크립트에서는 이 줄이 **붙지 않는다**(‑ `cp`와 바이트 동일 유지). 스크립트에서
+버전을 알아야 하면 `cargo install --list`나 패키지 관리자를 쓴다.
+
 ## 강제 종료 후 커서가 안 보일 때
 
 `cprog`는 정상 종료·에러·panic·시그널·Ctrl-Z 어느 경로로 끝나도 footer를 지우고 커서를 되살린다.

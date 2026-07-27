@@ -93,3 +93,21 @@ fn passthrough_output_is_byte_identical_to_cp() {
     );
     assert_eq!(mine.stderr, theirs.stderr, "passthrough stderr matches cp");
 }
+
+#[test]
+fn informational_output_stays_byte_identical_when_not_a_terminal() {
+    // #15: cprog names itself after `--help`/`--version`, but only on a terminal. With output
+    // captured — a pipe, a redirect, any script — both streams must still match `cp` exactly,
+    // or `alias cp='cprog'` would change what every `cp --version | …` in the system sees.
+    for flag in ["--version", "--help"] {
+        let ours = cprog([flag]);
+        let theirs = cp([flag]);
+        assert_eq!(ours.status.code(), theirs.status.code(), "{flag}: exit code");
+        assert_eq!(ours.stdout, theirs.stdout, "{flag}: stdout byte-identical");
+        assert_eq!(ours.stderr, theirs.stderr, "{flag}: stderr byte-identical");
+        assert!(
+            !String::from_utf8_lossy(&ours.stderr).contains("cprog "),
+            "{flag}: no version line when stderr is not a tty"
+        );
+    }
+}

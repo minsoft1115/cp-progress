@@ -97,6 +97,26 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
+/// One line naming cprog itself, appended after `cp`'s output for informational invocations
+/// (`--help` / `--version`), or `None` when it must stay silent.
+///
+/// `cprog` has no options of its own — `--version` reaches `cp` like any other argument — so
+/// without this a user has no way to tell which wrapper build is running, or that one is running
+/// at all. It is gated on `stderr_tty` because everywhere else the passthrough contract applies:
+/// redirected and piped output must stay byte-identical to `cp`, and a script doing
+/// `cp --version | tail -1` must keep working. Like the exit summary, it goes to stderr so stdout
+/// stays `cp`'s (docs/runtime-model.md "버전 표시").
+pub fn version_line(informational: bool, stderr_tty: bool) -> Option<String> {
+    if !informational || !stderr_tty {
+        return None;
+    }
+    Some(format!(
+        "cprog {} — {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_REPOSITORY")
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,6 +145,30 @@ mod tests {
         let f = Fatal::CpWait { pid: 42, source: "ECHILD".into() };
         assert_eq!(f.to_string(), "cprog: failed to wait for cp (pid 42): ECHILD");
         assert_eq!(f.code(), 1);
+    }
+
+    // ---- version line (#15, docs/runtime-model.md "버전 표시") ------------------------
+
+    #[test]
+    fn version_line_names_cprog_and_its_repository() {
+        let line = version_line(true, true).expect("shown for --help/--version on a tty");
+        assert!(line.starts_with("cprog "), "names the wrapper, not cp: {line:?}");
+        assert!(line.contains(env!("CARGO_PKG_VERSION")), "carries the version: {line:?}");
+        assert!(line.contains("github.com"), "points somewhere useful: {line:?}");
+    }
+
+    #[test]
+    fn version_line_is_absent_for_an_ordinary_copy() {
+        // Only informational invocations get it; a real copy already has the exit summary.
+        assert_eq!(version_line(false, true), None);
+    }
+
+    #[test]
+    fn version_line_is_absent_when_stderr_is_not_a_tty() {
+        // The passthrough contract: redirected or piped output stays byte-identical to `cp`,
+        // so `cp --version 2>/dev/null` and `cp --version | tail -1` are unaffected.
+        assert_eq!(version_line(true, false), None);
+        assert_eq!(version_line(false, false), None);
     }
 
     // ---- exit summary (docs/ui.md examples 4/5, runtime-model) -----------------------

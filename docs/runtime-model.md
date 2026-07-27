@@ -62,6 +62,34 @@ RunMode = ManagedTui | Passthrough
 전부 stderr로 보내 stdout은 `cp` 몫으로 남긴다. 개수/총량을 안 세므로 요약은 최소한
 (경과시간 위주, 단일 파일이면 그 파일 크기 정도).
 
+## 버전 표시 (`--help` / `--version`)
+
+`--help`·`--version`은 복사를 하지 않으므로 **passthrough**로 내려간다(위 참조). 그런데 그러면
+`cp`의 출력만 보여서 **사용자가 cprog의 버전을 알 방법이 없다** — `cprog --version`조차
+`cp (GNU coreutils) 9.x`만 낸다.
+
+그래서 informational 인자일 때만, `cp`가 끝난 뒤 **한 줄**을 덧붙인다:
+
+```
+cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
+```
+
+조건은 요약 규칙과 동일하다:
+
+- **stdout이 아니라 stderr로.** stdout은 `cp` 몫이다. 스크립트가 `cp --version | tail -1`처럼
+  파싱하는 경우를 깨지 않는다.
+- **stderr가 TTY일 때만.** 리다이렉트·파이프·CI에서는 아무것도 안 붙어 **`cp`와 바이트 동일**이
+  유지된다. "추가 UI는 대화형 터미널에서만"이라는 managed/passthrough 분기와 같은 원칙이다.
+
+```bash
+cp --version                 # 터미널: cp 출력 + cprog 한 줄
+cp --version | head -1       # 파이프: stdout 그대로
+cp --version 2>/dev/null     # 스크립트: 조용
+```
+
+> **자체 플래그는 두지 않는다.** `cprog --version` 같은 걸 가로채면 `cp`로 인자를 그대로 넘긴다는
+> 전제가 깨진다. `--version`은 언제나 `cp`에 도달해야 한다.
+
 ## 종료 동작
 
 - 정상: `cp`의 exit code 그대로 반환.
