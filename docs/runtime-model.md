@@ -30,6 +30,9 @@ RunMode = ManagedTui | Passthrough
 - **전경(foreground) 프로세스 그룹임** — `tcgetpgrp(stdout) == getpgrp()`. 백그라운드 작업
   (`cprog … &`)은 터미널을 점거하면 안 되므로 managed를 포기하고 passthrough로 동작한다.
   (‑ `tcgetpgrp`이 `ENOTTY`면 제어터미널이 아니어서 백그라운드 판정 불가 → 관대하게 허용.)
+- **`CPROG_PASSTHROUGH` 미설정** — 설정돼 있으면(값 무관 — `CI`·`NO_COLOR`와 같은 규칙)
+  다른 조건과 무관하게 passthrough다. "완전히 비켜라"는 명시적 스위치로, 디버깅과 방어적
+  스크립트용이다([`usage.md`](./usage.md) "강제 passthrough").
 
 하나라도 실패하면 **Passthrough**. 인자 검사 자체가 실패해도 보수적으로 passthrough.
 
@@ -46,8 +49,15 @@ RunMode = ManagedTui | Passthrough
 
 ## Passthrough
 
-- `cp`를 스트림 inherit로 실행. `-v` 주입·캡처·footer 없음.
-- 출력이 `cp`와 바이트 동일.
+- 원칙적으로 `cp`로 **exec한다(프로세스 대체)** — cprog가 소멸하고 같은 PID가 `cp`가 되므로,
+  exit code·시그널·job control이 아무 중계 없이 셸에 그대로 노출된다(`cp … &`의 `$!`도 진짜
+  `cp`의 PID다). exec 직전에 SIGPIPE를 기본 disposition으로 되돌린다 — Rust 런타임이 ignore로
+  바꿔둔 것이 exec를 넘어 상속되면 `cp -v … | head` 같은 파이프라인에서 순정과 달라진다.
+  exec 실패(예: `cp` 없음)만 `Fatal::CpSpawn`(exit 127)으로 돌아온다.
+- 유일한 예외는 **버전 한 줄을 붙여야 할 때**(`--help`/`--version` + stderr TTY + 강제 아님,
+  아래 "버전 표시"): cp가 끝난 뒤 덧붙일 프로세스가 남아 있어야 하므로 spawn(inherit) → wait로
+  실행한다.
+- 어느 쪽이든 `-v` 주입·캡처·footer 없음. 출력이 `cp`와 바이트 동일.
 
 ## 요약 규칙 (managed일 때만)
 
@@ -98,6 +108,10 @@ cp --version 2>/dev/null     # 스크립트: 조용
 
 > **자체 플래그는 두지 않는다.** `cprog --version` 같은 걸 가로채면 `cp`로 인자를 그대로 넘긴다는
 > 전제가 깨진다. `--version`은 언제나 `cp`에 도달해야 한다.
+
+**`CPROG_PASSTHROUGH`가 설정돼 있으면 이 한 줄도 억제된다.** 강제 passthrough는 "cprog가
+덧붙이는 모든 것을 꺼라"는 명시적 의사이고, 이때 passthrough는 exec라 cp가 끝난 뒤 덧붙일
+프로세스 자체가 없다.
 
 ## 종료 동작
 

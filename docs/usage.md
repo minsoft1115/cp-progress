@@ -50,8 +50,28 @@ cprog -i big.iso backup.iso
 - 백그라운드 실행: `cprog a b &` (전경 프로세스 그룹이 아니면 터미널을 점거하지 않음).
   Ctrl-Z 후 `bg`로 백그라운드 재개한 경우도 이후 footer를 그리지 않는다(‑ `fg`로 되돌려도
   그 실행에서는 꺼진 채 유지; 다시 Ctrl-Z 후 `fg` 하면 복구).
+- `CPROG_PASSTHROUGH`가 설정됨(아래 "강제 passthrough").
 
 이 모든 경우 `cprog`는 `cp`와 바이트 동일.
+
+## 강제 passthrough (`CPROG_PASSTHROUGH`)
+
+`CPROG_PASSTHROUGH`가 설정돼 있으면(값 무관 — `CI`·`NO_COLOR`와 같은 규칙) 다른 조건과
+무관하게 **무조건 passthrough**다. footer·캡처·`-v` 주입·요약, 그리고 `--help`/`--version`의
+cprog 버전 한 줄까지 — cprog가 덧붙이는 모든 것이 꺼진다.
+
+```bash
+CPROG_PASSTHROUGH=1 cp -r photos backup   # 이 복사 한 번만 순정처럼
+export CPROG_PASSTHROUGH=1                # 이 셸에서는 계속 순정처럼 (unset으로 복귀)
+```
+
+이때 `cprog`는 `cp`를 자식으로 두지 않고 **`cp`로 exec한다(프로세스 대체)** — 같은 PID가
+`cp`가 되므로 `cp big.iso dst &`의 `$!`가 진짜 `cp`를 가리키고, 시그널과 exit code가 중계
+없이 셸에 닿는다. 진행바가 이상해 보일 때 "순정 `cp`면 어떤가"를 확인하는 디버깅 스위치이자,
+스크립트가 방어적으로 걸어둘 수 있는 안전핀이다.
+
+`cprog` 바이너리 자체를 우회해야 하는 상황의 최종 탈출구는 여전히 alias를 건너뛰는 `\cp`
+(또는 `command cp`)다 — 그때는 cprog가 아예 실행되지 않는다.
 
 ## 바가 뜨는 경우
 
@@ -82,6 +102,7 @@ cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
 
 이 줄은 **stderr가 터미널일 때만** 붙는다 — stderr를 파이프·리다이렉트한 스크립트에서는 붙지
 않아 `cp`와 바이트 동일이 유지된다(‑ stdout만 리다이렉트하면 stderr로는 여전히 붙는다).
+`CPROG_PASSTHROUGH`가 설정돼 있으면 터미널이어도 붙지 않는다(위 "강제 passthrough").
 스크립트에서 버전을 알아야 하면 `cargo install --list`나 패키지 관리자를 쓴다.
 
 ## 강제 종료 후 커서가 안 보일 때
@@ -98,6 +119,7 @@ tput cnorm
 
 | 변수 | 효과 |
 |---|---|
+| `CPROG_PASSTHROUGH` | 강제 passthrough(설정만 돼 있으면 값 무관) — cprog가 덧붙이는 모든 출력·UI 끔, `cp`로 exec |
 | `NO_COLOR` | footer 색 끔(설정만 돼 있으면 값 무관) |
 | `CPROG_SLOW_THRESHOLD_MS` | 느린 파일 판정 임계(기본 100) |
 | `CPROG_SAMPLE_INTERVAL_MS` | `stat` 폴링 주기(기본 100) |

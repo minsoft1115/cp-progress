@@ -32,8 +32,9 @@ instead. No external `progress` command, no hidden PTY, no screen-scraping.
 - Where a footer isn't safe it falls back to passthrough — streams inherited, environment
   untouched, **byte-identical to `cp`**. That covers: stdout or stderr not a TTY (a pipe or a
   redirect), the two not on the same terminal, `TERM` unset or `dumb`, `CI` set, non-Linux,
-  `stdbuf` missing, a background job (`cprog … &`), an interactive flag (`-i`), and
-  `--help`/`--version`.
+  `stdbuf` missing, a background job (`cprog … &`), an interactive flag (`-i`),
+  `--help`/`--version`, and `CPROG_PASSTHROUGH` set — an explicit escape hatch that also makes
+  cprog exec the real `cp` in place, leaving no wrapper process at all.
 
 It computes progress itself from `cp`'s own `-v` timing and the kernel's `/proc`/`stat` — no
 external progress tool, no hidden PTY, no screen-scraping.
@@ -153,6 +154,7 @@ All optional, all with safe defaults; an unparsable value silently falls back to
 
 | Variable | Effect |
 |---|---|
+| `CPROG_PASSTHROUGH` | Forces passthrough unconditionally (any value) — every cprog addition is off, version line included; cprog execs the real `cp` in place |
 | `CPROG_SLOW_THRESHOLD_MS` | How long one file must take before its bar appears (default 100) |
 | `CPROG_SAMPLE_INTERVAL_MS` | `stat` polling interval while a file is slow (default 100) |
 | `CPROG_RENDER_TICK_MS` | Footer redraw tick (default 125) |

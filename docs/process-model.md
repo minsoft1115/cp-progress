@@ -36,10 +36,24 @@
 
 ## Passthrough 생명주기
 
+원칙은 **exec에 의한 프로세스 대체**다:
+
+```
+1. SIGPIPE를 기본 disposition으로 복원
+   (Rust 런타임의 ignore가 exec를 넘어가면 `cp -v … | head`에서 순정과 달라진다 — A7)
+2. cp로 exec — cprog는 소멸, 같은 PID가 cp가 된다
+   (이후의 시그널·exit·job control은 cprog를 거치지 않고, `$!`도 진짜 cp의 PID다.
+    exec 실패(cp 없음 등)만 Fatal::CpSpawn → exit 127로 돌아온다)
+```
+
+예외 — **버전 한 줄을 붙일 때만**(`--help`/`--version` + stderr TTY + `CPROG_PASSTHROUGH`
+아님) cp가 끝난 뒤 덧붙일 프로세스가 남아 있어야 하므로 기존 방식으로 실행한다:
+
 ```
 1. cp spawn (inherit)
 2. wait
-3. cp status로 exit 확정
+3. 버전 한 줄(stderr)
+4. cp status로 exit 확정
 ```
 
 ## 샘플링과 종료
@@ -51,7 +65,8 @@
   남아 **재사용될 수 없다**(오염 샘플·pid 재사용 레이스 없음).
 - 모든 샘플 실패는 비치명(건너뛰고 마지막 값 유지).
 - 리눅스 `PR_SET_PDEATHSIG`로 래퍼가 죽으면 자식이 남지 않게 함(누수될 helper *프로세스*는
-  애초에 없다).
+  애초에 없다). **spawn 경로에만 건다** — exec된 passthrough에는 지킬 부모(cprog)가 없고,
+  설정이 exec를 넘어 남으면 `cp`의 수명이 *셸*에 묶여 순정과 달라진다.
 
 ## 정리 (Cleanup)
 

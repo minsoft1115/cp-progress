@@ -50,8 +50,8 @@
 | A3 | **시그널 도착 시 `cp`가 이미 종료** | `try_wait`이 `Some(_)`이면 전달 생략. `try_wait` 자체가 에러면 "살아있을 수도"로 보고 방어적으로 `kill` — 이미 죽은 pid엔 `ESRCH`라 무해 | ✅ `lib.rs::run_managed` |
 | A4 | **잡는 시그널의 범위** | `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` 4종만 등록. 그 외(`SIGUSR1` 등)는 기본 동작 | 🟡 `lib.rs::run_managed` |
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
-| A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않음 → cprog와 cp 모두 기본 동작(전경 그룹 전체가 함께 죽음) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
-| A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). 자식은 `std::process::Command`가 기본 disposition을 복원해 `cp`가 정상적으로 SIGPIPE에 반응 | 🟡 `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
+| A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않으며, passthrough는 exec라 시그널을 받는 것이 곧 `cp` 본체다(‑ 버전 한 줄 경로만 spawn+wait이고 거기서도 핸들러 없이 기본 동작) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
+| A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). spawn된 자식은 `std::process::Command`가 기본 disposition을 복원하고, **exec 경로는 exec 직전에 직접 `SIG_DFL`로 복원**한다 — ignore가 exec를 넘어가면 `cp -v … \| head`에서 순정과 달라지기 때문 | ✅ `tests/passthrough.rs::verbose_to_a_closed_pipe_dies_of_sigpipe_like_cp`, `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
 | A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](./process-model.md#정리-cleanup) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
 
 ## Ctrl-Z / job control
@@ -91,6 +91,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄) | ✅ `args.rs::missing_required_value_is_scan_error`, 폴백 배선은 `tests/passthrough.rs::scan_error_falls_back_to_passthrough_byte_identical` |
 | B14 | **`sudo cprog` / setuid `cp`** | `stdbuf`는 `LD_PRELOAD` 기반이라 setuid 바이너리에선 무시됨. cp가 setuid인 극히 드문 환경에서는 라이브성이 degrade | 📄 `capture-and-verbose.md` |
 | B15 | **모드는 실행 전에 한 번만 결정** | 실행 중 파이프/TTY 상태가 바뀌어도 모드는 안 바뀐다(단순화). 유일한 런타임 재확인은 A10의 전경 여부 | 📄 `runtime-model.md` |
+| B16 | **`CPROG_PASSTHROUGH` 설정** (값 무관 — B6·F10과 같은 규칙, 빈 문자열 포함) | 무조건 passthrough. `--help`/`--version`의 cprog 버전 한 줄(B12/#15)까지 억제되고, passthrough는 exec라 화면에도 프로세스 목록에도 cprog의 흔적이 없다 | ✅ `plan.rs::forced_passthrough_wins_over_everything`, `tests/forced_passthrough.rs` |
 
 ---
 
@@ -101,7 +102,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | C1 | **`cp`가 PATH에 없음 / 실행 불가** | `Fatal::CpSpawn` → stderr 한 줄 + **exit 127**(셸 관례) | ✅ `messages::Fatal`, `messages.rs::cp_spawn_fatal`, 실바이너리 `tests/exit_contract.rs::missing_cp_is_fatal_cpspawn_exit_127` |
 | C2 | **`cp`가 비-0으로 종료** (권한 없음, ENOSPC, `-r` 없이 디렉터리) | cp의 에러를 로그 영역에 relay → footer 지움 → **중립 문구** `✗ cp exited n - T elapsed`(진행바가 떴을 때만) → exit code 그대로 | ✅ `tests/managed.rs::managed_relays_cp_error_and_preserves_exit_code`, `tests/passthrough.rs::preserves_nonzero_exit_on_cp_failure` |
 | C3 | **`wait()` 실패** (예: `ECHILD`) | `Fatal::CpWait { pid, source }` → exit 1 | ✅ `messages.rs::cp_wait_fatal` |
-| C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님) | 🟡 `process::spawn` |
+| C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님). **spawn 경로에만 해당** — exec된 passthrough는 cprog가 곧 `cp`라 고아 문제가 없고, PDEATHSIG를 걸지도 않는다(걸면 `cp`의 수명이 셸에 묶여 순정과 달라짐) | 🟡 `process::spawn`, `process::exec_replace` |
 | C5 | **C4에서 부분 복사된 대상 파일** | `cp`는 SIGTERM에 정리를 하지 않으므로 **잘린 대상 파일이 남는다.** 이는 `cp`를 직접 죽였을 때와 동일한 결과 — 의미론 보존 | 📄 |
 | C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`; `tests/managed.rs`가 간접 증명(D7 — footer가 떴다는 것 자체가 spawn된 pid로 `cp`의 fd를 읽었다는 뜻) |
 | C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임) | 🟡 |
