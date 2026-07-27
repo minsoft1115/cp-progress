@@ -22,6 +22,7 @@
   시그널 보존 종료
 - [`dependencies.md`](./dependencies.md) — 크레이트 선정(유지보수·최소주의)
 - [`testing.md`](./testing.md) — test-first(TDD) 전략
+- [`performance.md`](./performance.md) — 오버헤드 실측 기준선과 재는 방법(‑ 회귀 비교용)
 - [`exceptions.md`](./exceptions.md) — 예외 상황 카탈로그(시그널·Ctrl-Z·passthrough 강제·
   진행 계산 한계) + 미커버 갭과 권고
 - [`usage.md`](./usage.md) — 사용법과 동작
