@@ -79,4 +79,7 @@ enum Fatal   { Usage, CpSpawn(String), CpWait { pid: u32, source: String } }
   best-effort**로 처리한다(‑ `let _ = ...`). exit code에 영향 없음. (실패하는 대상이 터미널
   자체라 그 터미널로 경고를 내보내는 게 신뢰할 수 없어, 방출 sink는 배선하지 않았다. 타입은
   향후 배선 여지로 남겨둔다.)
+- `Fatal` 메시지와 종료 요약(summary)의 stderr 출력도 best-effort다(‑ `let _ = writeln!(…)`):
+  그 쓰기가 실패해도(예: stderr가 끊긴 파이프라 `EPIPE`) panic하지 않아 `cp`의 exit code 계약을
+  지킨다(`eprintln!`은 실패 시 panic한다).
 - 터미널은 모든 경로(정상/`?`/panic/시그널)에서 `FooterGuard`의 `Drop`으로 복구.

@@ -32,6 +32,10 @@ impl TmpDir {
         std::fs::create_dir_all(&dir).unwrap();
         TmpDir(dir)
     }
+    /// A path to `name` inside this temp directory.
+    pub fn path(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
 }
 impl Drop for TmpDir {
     fn drop(&mut self) {
@@ -47,6 +51,25 @@ pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
 /// Index of the last occurrence of `needle` in `hay`.
 pub fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
     (0..=hay.len().saturating_sub(needle.len())).rev().find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Strip ANSI CSI sequences so a footer line's visible width can be measured.
+pub fn strip_sgr(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else if !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Poll a fd for readability, up to `ms` milliseconds.

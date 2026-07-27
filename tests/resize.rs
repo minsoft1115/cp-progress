@@ -25,40 +25,7 @@ use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::read_retry;
-
-struct TmpDir(std::path::PathBuf);
-impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("cprog_rsz_{}_{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Strip ANSI CSI sequences so a footer line's visible width can be measured.
-fn strip_sgr(bytes: &[u8]) -> String {
-    let s = String::from_utf8_lossy(bytes);
-    let mut out = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            for n in chars.by_ref() {
-                if n.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else if !c.is_control() {
-            out.push(c);
-        }
-    }
-    out
-}
+use common::{read_retry, strip_sgr, TmpDir};
 
 /// Visible widths of the footer redraws (each `\r`-delimited segment containing a `%`) in `data`.
 fn footer_widths(data: &[u8]) -> Vec<usize> {

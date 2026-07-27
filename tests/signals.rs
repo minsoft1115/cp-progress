@@ -18,26 +18,7 @@ use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::read_retry;
-
-struct TmpDir(std::path::PathBuf);
-impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("cprog_sig_{}_{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Index of the last occurrence of `needle` in `hay`.
-fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    (0..=hay.len().saturating_sub(needle.len())).rev().find(|&i| &hay[i..i + needle.len()] == needle)
-}
+use common::{read_retry, rfind, TmpDir};
 
 #[test]
 fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {

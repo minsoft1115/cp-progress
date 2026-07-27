@@ -15,22 +15,7 @@ use std::process::{Command, Stdio};
 use nix::pty::{openpty, Winsize};
 
 mod common;
-use common::read_retry;
-
-/// A throwaway temp directory, removed on drop.
-struct TmpDir(std::path::PathBuf);
-impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("cprog_mgd_{}_{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::{read_retry, TmpDir};
 
 #[test]
 fn managed_streams_verbose_and_draws_footer_over_pty() {

@@ -14,21 +14,7 @@ use std::process::{Command, Stdio};
 use nix::pty::{openpty, Winsize};
 
 mod common;
-use common::read_retry;
-
-struct TmpDir(PathBuf);
-impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("cprog_fb_{}_{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use common::{read_retry, TmpDir};
 
 /// Locate the real `cp` on the current PATH.
 fn find_cp() -> PathBuf {

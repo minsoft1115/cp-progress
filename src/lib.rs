@@ -31,7 +31,7 @@ pub mod messages;
 pub mod exit;
 
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -62,7 +62,9 @@ pub fn run() -> i32 {
         // Preserve cp's exit disposition: a signal is re-raised, a code returned.
         Ok(disp) => finalize(disp),
         Err(fatal) => {
-            eprintln!("{fatal}");
+            // Best-effort: a failed stderr write (e.g. a broken pipe) must not panic and clobber
+            // cp's exit disposition with 101 (docs/architecture.md "에러 철학").
+            let _ = writeln!(io::stderr(), "{fatal}");
             fatal.code()
         }
     }
@@ -240,6 +242,10 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         }
         // guard's Drop erases the footer on the way out (docs/testing.md C7).
     }
+    // The render loop is gone, so nothing acts on the SIGTSTP flag anymore. Hand Ctrl-Z back to
+    // its default disposition (stop the group) so a suspend during teardown (join/wait) isn't
+    // trapped-and-swallowed into a wedge (docs/process-model.md "정리").
+    restore_default_suspend();
 
     // If we were signaled, cp may still be running — a signal delivered to cprog alone (e.g.
     // `kill <cprog>`) rather than the whole foreground group. In that case the reader threads are
@@ -265,7 +271,8 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         .map_err(|e| Fatal::CpWait { pid, source: e.to_string() })?;
     let disp = disposition(status);
     if let Some(line) = summary(&disp, start.elapsed(), style.color, progress_shown) {
-        eprintln!("{line}");
+        // Best-effort, same rationale as the Fatal path: never let a stderr write failure panic.
+        let _ = writeln!(io::stderr(), "{line}");
     }
     Ok(disp)
 }
@@ -296,4 +303,46 @@ pub(crate) fn lock_shared<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 fn env_ms(var: &str, default_ms: u64) -> Duration {
     let ms = std::env::var(var).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default_ms);
     Duration::from_millis(ms)
+}
+
+/// Restore `SIGTSTP` (Ctrl-Z) to its default disposition after the managed render loop ends.
+///
+/// During the loop the loop itself acts on a `signal_hook` flag (restore the terminal, then
+/// self-`SIGSTOP`). Once the loop is gone that flag has no reader, and `signal_hook`'s handler
+/// stays installed — so a Ctrl-Z during teardown would be silently swallowed (neither suspending
+/// nor progressing). `signal_hook`'s `unregister` would only make it *ignore* the signal, not
+/// restore the default, so reset the handler directly (docs/process-model.md "정리").
+fn restore_default_suspend() {
+    // SAFETY: resetting a signal to its default disposition is a valid, async-signal-safe call.
+    unsafe {
+        libc::signal(SIGTSTP, libc::SIG_DFL);
+    }
+}
+
+#[cfg(test)]
+mod teardown_signal_disposition {
+    use super::*;
+
+    /// After the render loop, SIGTSTP must revert to its default disposition. Installing the same
+    /// `signal_hook` flag `run_managed` uses and then tearing down must leave the OS handler at
+    /// `SIG_DFL` — otherwise a Ctrl-Z during teardown would be trapped and swallowed (a wedge).
+    #[test]
+    fn suspend_reverts_to_default_after_render_loop() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let id = signal_hook::flag::register(SIGTSTP, Arc::clone(&flag)).expect("register SIGTSTP");
+
+        restore_default_suspend();
+
+        // Query (act = NULL) the current SIGTSTP disposition; it must be the default handler.
+        let mut cur: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: reading the current SIGTSTP action into a zeroed, owned sigaction struct.
+        unsafe { libc::sigaction(SIGTSTP, std::ptr::null(), &mut cur) };
+        assert_eq!(
+            cur.sa_sigaction,
+            libc::SIG_DFL,
+            "SIGTSTP must be restored to SIG_DFL after the render loop, not left trapped"
+        );
+
+        let _ = signal_hook::low_level::unregister(id);
+    }
 }

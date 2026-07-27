@@ -5,28 +5,10 @@
 //! preserve `cp`'s exit code, and stay byte-identical to `cp` when not managed.
 
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::process::{Command, Output};
 
-/// A throwaway temp directory, removed on drop.
-struct TmpDir(PathBuf);
-
-impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("cprog_it_{}_{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
-        TmpDir(dir)
-    }
-    fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
-    }
-}
-
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+mod common;
+use common::TmpDir;
 
 fn cprog<I, S>(args: I) -> Output
 where

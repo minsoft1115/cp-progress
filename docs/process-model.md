@@ -61,6 +61,10 @@
   footer를 지우고 커서를 복원한 뒤 `SIGSTOP`으로 실제 정지하고(‑ `SIGTSTP` 플래그 핸들러는 유지),
   재개(`SIGCONT`) 시 다음 tick에서 커서 재숨김 + footer 재그림. `Drop`은 정지가 아니라 종료에서만
   돌기 때문.
+- 렌더 루프가 끝나면(정상 종료·시그널·리더 disconnect) **`SIGTSTP` 처리를 기본 동작으로 되돌린다**:
+  루프가 사라진 뒤에도 플래그 핸들러가 남아 있으면 teardown(join/wait) 구간의 Ctrl-Z가 정지도
+  진행도 못 하고 삼켜지므로(wedge). 기본 disposition(그룹 정지)으로 복원해 그 구간에서도 job
+  control이 정상 동작하게 한다.
 - **백그라운드 재개(`bg`) 시 footer 억제는 단방향**이다: 재개 시점에 전경이 아니면 footer를
   끄고, 이후 `fg`로 전경에 복귀해도 다시 켜지 않는다(전경 여부는 suspend-재개 시에만 재확인 —
   "모드는 확정 후 안 바뀐다"와 같은 단순화). 또 한 번 Ctrl-Z 후 `fg` 하면 footer가 복구된다.
