@@ -147,7 +147,7 @@
 | D1 | `cp` 중간 실패(권한/ENOSPC) | 에러 relay, footer 정리, exit code 보존 | 통합 + exit 유닛 |
 | D2 | `cp` 시그널 종료 | 시그널 보존, 요약 없음, footer 정리 | 통합 + exit 유닛 |
 | D3 | `cprog`가 직접 시그널(Ctrl-C) 받음 | footer 정리 + 같은 시그널 재현 | 통합 |
-| D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛/통합 |
+| D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛 + 실바이너리(`tests/exit_contract.rs` — 빈 PATH라 외부 도구 불요, 기본 스위트) |
 | D5 | 인자 없음 | `Fatal::Usage`, exit 1 | 유닛 |
 | D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_notice`) + 통합(PTY/비-TTY 양쪽) |
 | D6 | `cp` 정상 exit code n | 그대로 n 반환 | 유닛 + 통합 |

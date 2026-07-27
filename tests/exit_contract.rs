@@ -7,7 +7,8 @@
 //! EPIPE (Rust ignores SIGPIPE, so it surfaces as an error rather than a signal).
 //!
 //! This runs in the default (non-integration) suite: it spawns only cprog — no external `cp` — and
-//! exercises the empty-args `Fatal::Usage` path, which prints then returns code 1.
+//! exercises the empty-args `Fatal::Usage` path, which prints then returns code 1, plus the
+//! `Fatal::CpSpawn` path, where `cp` is deliberately unfindable.
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
@@ -36,4 +37,21 @@ fn usage_exit_code_survives_a_broken_stderr_pipe() {
         Some(1),
         "usage exit code must be preserved even when stderr is a broken pipe (a panic would give 101)"
     );
+}
+
+#[test]
+fn missing_cp_is_fatal_cpspawn_exit_127() {
+    // docs/testing.md D4 / exceptions C1: no `cp` on PATH -> Fatal::CpSpawn -> a cprog-prefixed
+    // message on stderr and exit 127 (the shell's cannot-execute convention), not a panic.
+    // An empty PATH makes cp unfindable without needing any external tool.
+    let out = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .args(["a", "b"])
+        .env("PATH", "")
+        .stdin(Stdio::null())
+        .output()
+        .expect("spawn cprog");
+
+    assert_eq!(out.status.code(), Some(127), "CpSpawn maps to 127");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cprog: failed to run cp"), "names the failure: {err:?}");
 }
