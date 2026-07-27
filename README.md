@@ -1,5 +1,6 @@
 # cprog
 
+[![CI](https://github.com/minsoft1115/cp-progress/actions/workflows/ci.yml/badge.svg)](https://github.com/minsoft1115/cp-progress/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/cp-progress.svg)](https://crates.io/crates/cp-progress)
 [![docs.rs](https://img.shields.io/docsrs/cp-progress)](https://docs.rs/cp-progress)
 [![license](https://img.shields.io/crates/l/cp-progress.svg)](./LICENSE)

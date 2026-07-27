@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test + clippy (stable)
+    runs-on: ubuntu-latest
+    # cprog wraps signals, job control and PTYs, so a regression can hang rather than
+    # fail. Cap the job so that shows up as a red run in minutes, not hours.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The integration suite drives the real `cp` through `stdbuf`. Without `stdbuf`
+      # cprog deliberately falls back to passthrough (docs/runtime-model.md), so a
+      # missing tool would surface as "the footer never appeared" — a confusing failure
+      # far from its cause. Fail loudly here instead.
+      - name: Check the tools the integration suite needs
+        run: |
+          command -v cp
+          command -v stdbuf
+          cp --version | head -1
+
+      # Guardrail from docs/testing.md: the default suite must be green with no external
+      # tools at all, so it is run on its own before anything is unlocked.
+      - name: Unit suite (no external tools)
+        run: cargo test --locked
+
+      - name: Integration suite (real cp / stdbuf / PTY)
+        run: cargo test --locked --features integration
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --locked --all-targets --features integration -- -D warnings
+
+  msrv:
+    name: MSRV 1.85
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # README and Cargo.toml both promise Rust 1.85 (edition 2024). Nothing enforces
+      # that promise unless it is compiled with exactly that toolchain.
+      - uses: dtolnay/rust-toolchain@1.85
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check with the declared minimum toolchain
+        run: cargo check --locked --all-targets --features integration
+
+  package:
+    name: package (publish dry-run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # A crates.io release cannot be edited after the fact, so verify the package
+      # builds from its own contents — this catches a file that is git-ignored or
+      # otherwise missing from the .crate long before release day.
+      - name: Verify the crate packages and builds standalone
+        run: cargo publish --locked --dry-run
