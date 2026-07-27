@@ -74,6 +74,16 @@ impl ProgressModel {
         }
     }
 
+    /// Drop every recorded sample, keeping `total` and the window.
+    ///
+    /// Used when wall-clock time passed without the copy being able to run — a job-control stop
+    /// (`Ctrl-Z`) stops `cp` too, so the elapsed span carries no throughput information. Leaving
+    /// those samples in place would make the window read as "no progress for N seconds" and
+    /// report a near-zero rate (or an absurd eta) for a full window after resuming (#9).
+    pub fn reset_samples(&mut self) {
+        self.samples.clear();
+    }
+
     /// Bytes landed so far (last sample), or 0 if no sample yet.
     pub fn done(&self) -> u64 {
         self.samples.back().map(|&(_, d)| d).unwrap_or(0)
@@ -264,6 +274,39 @@ mod tests {
     }
 
     // ---- snapshot DTO ----------------------------------------------------------------
+
+    #[test]
+    fn reset_samples_clears_the_rate_history_but_keeps_total() {
+        // #9: after a Ctrl-Z the elapsed span carries no throughput information, so the samples
+        // spanning the stop are dropped. total (the file's size) is not timing data and stays.
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0 + Duration::from_secs(1), 200);
+        assert!(m.rate().is_some());
+
+        m.reset_samples();
+        assert_eq!(m.rate(), None, "no rate until fresh samples arrive");
+        assert_eq!(m.eta(), None);
+        assert_eq!(m.percent(), Some(0.0), "total kept; done is unknown until the next sample");
+
+        // Two post-resume samples rebuild the rate from real throughput only.
+        let t1 = t0 + Duration::from_secs(60); // stopped for a minute
+        m.push(t1, 200);
+        m.push(t1 + Duration::from_secs(1), 500);
+        assert!(approx(m.rate().unwrap(), 300.0), "the stopped minute is not averaged in");
+    }
+
+    #[test]
+    fn without_reset_a_long_stop_drags_the_rate_to_zero() {
+        // The behaviour being fixed: the window is wall-clock based, so a suspend looks like
+        // "no progress for a minute" and the rate collapses for a full window after resuming.
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 200);
+        m.push(t0 + Duration::from_secs(60), 200); // stopped the whole time
+        assert!(approx(m.rate().unwrap(), 0.0));
+    }
 
     #[test]
     fn snapshot_builds_progress_state() {

@@ -2,10 +2,14 @@
 //! (docs/progress-model.md). Never touches `cp`.
 //!
 //! `cp` copies one file at a time, holding the source open read-only and the destination
-//! open for writing. The pure [`select_current`] rule turns a snapshot of a process's open
-//! fds into the current destination (whose size gives `done`) and source (whose size gives
-//! `total`). Reading real `/proc` sits behind the [`ProcSource`] seam so this rule is
-//! unit-tested from fixtures; the concrete Linux reader is wired with the sampler.
+//! open for writing. [`select_current`] turns a snapshot of a process's open fds into the
+//! write and read candidates, and [`source_for`] pairs a source to a chosen destination by fd
+//! number. Both are pure rules over `(fd, path, kind)`, so they are unit-tested from fixtures;
+//! reading real `/proc` sits behind the [`ProcSource`] seam and is wired with the sampler.
+//!
+//! Neither list is trustworthy on its own: descriptors the shell opened are inherited into `cp`
+//! and carry low fd numbers, so they sort ahead of the real ones. The destination is resolved by
+//! growth in the sampler, the source by its fd position relative to it.
 
 use std::fs;
 use std::io;
@@ -33,14 +37,20 @@ pub struct FdEntry {
     pub kind: FdKind,
 }
 
-/// The file `cp` is currently copying: the growing destination and, when identifiable, its
-/// source. A missing `source` leaves `total` unknown (indeterminate bar).
+/// What `cp` currently has open: the plausible destinations and sources, each with its fd number.
+///
+/// Both lists can contain files that have nothing to do with the copy, because a file descriptor
+/// the shell opened (`cprog a b 3>log`, `3<other`) is not close-on-exec and is inherited into
+/// `cp` — with a *low* number, so it sorts ahead of what `cp` opens itself. Picking between them
+/// needs information this snapshot does not have, so it is left to the caller:
+/// [`crate::sampler::Sampler`] picks the destination by growth and then pairs the source with
+/// [`source_for`] (docs/progress-model.md).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentFile {
-    /// Destination path — polled for `done` (docs/progress-model.md).
-    pub dest: PathBuf,
-    /// Source path — stat'd once for `total`; `None` when the source is not a regular file.
-    pub source: Option<PathBuf>,
+    /// `(fd, path)` of every regular file above the stdio range open for writing, in fd order.
+    pub dests: Vec<(i32, PathBuf)>,
+    /// `(fd, path)` of every regular file above the stdio range open read-only, in fd order.
+    pub sources: Vec<(i32, PathBuf)>,
 }
 
 /// Reads the open fds of a process. Behind a trait so the selection rule can be
@@ -50,22 +60,40 @@ pub trait ProcSource {
     fn fds(&self, pid: u32) -> io::Result<Vec<FdEntry>>;
 }
 
-/// Pick the current destination/source from a snapshot of open fds.
+/// Collect the write and read candidates from a snapshot of open fds.
 ///
 /// Only fds above the stdio range (`fd > 2`) are considered, so a redirected stdin/stdout
 /// pointing at a regular file is never mistaken for the copy's source/destination. Returns
-/// `None` when no growing destination is open (between files, or during a directory op).
+/// `None` when nothing is open for writing (between files, or during a directory op).
 pub fn select_current(entries: &[FdEntry]) -> Option<CurrentFile> {
-    let mut copy_fds = entries.iter().filter(|e| e.fd > 2);
-    let dest = copy_fds
-        .clone()
-        .find(|e| e.kind == FdKind::RegularWrite)?
-        .path
-        .clone();
-    let source = copy_fds
-        .find(|e| e.kind == FdKind::RegularRead)
-        .map(|e| e.path.clone());
-    Some(CurrentFile { dest, source })
+    let copy_fds = entries.iter().filter(|e| e.fd > 2);
+    let of_kind = |want: FdKind| -> Vec<(i32, PathBuf)> {
+        copy_fds.clone().filter(|e| e.kind == want).map(|e| (e.fd, e.path.clone())).collect()
+    };
+    let dests = of_kind(FdKind::RegularWrite);
+    if dests.is_empty() {
+        return None;
+    }
+    Some(CurrentFile { sources: of_kind(FdKind::RegularRead), dests })
+}
+
+/// The source belonging to the destination at `dest_fd`.
+///
+/// `cp` copies one file at a time and opens its source immediately before its destination, so the
+/// source of the copy in flight is the **highest-numbered read fd below the destination**. That
+/// rule excludes both a read fd the shell handed down (low number, opened long before) and one
+/// opened after the destination, neither of which can be this copy's source.
+///
+/// Growth cannot be used here the way it is for destinations (#6): a source is only read, so its
+/// size never changes. When no read fd sits below the destination the answer is `None` rather than
+/// a guess — `total` stays unknown and the bar renders indeterminate, which beats a ratio measured
+/// against the wrong file.
+pub fn source_for(dest_fd: i32, sources: &[(i32, PathBuf)]) -> Option<PathBuf> {
+    sources
+        .iter()
+        .filter(|(fd, _)| *fd < dest_fd)
+        .max_by_key(|(fd, _)| *fd)
+        .map(|(_, path)| path.clone())
 }
 
 /// The real `/proc`-backed [`ProcSource`].
@@ -136,8 +164,65 @@ mod tests {
         e.push(entry(3, "/src/a.iso", FdKind::RegularRead));
         e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
         let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dest, PathBuf::from("/dst/a.iso"));
-        assert_eq!(cur.source, Some(PathBuf::from("/src/a.iso")));
+        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(4, &cur.sources), Some(PathBuf::from("/src/a.iso")));
+    }
+
+    // ---- #11: an inherited *read* fd must not be taken for the source --------------------
+
+    #[test]
+    fn inherited_read_fd_is_not_taken_as_the_source() {
+        // `exec 3</etc/passwd` before cprog: fd 3 is inherited into cp and sorts first, but the
+        // source of the copy in flight is the read fd cp opened just before the destination.
+        let mut e = stdio().to_vec();
+        e.push(entry(3, "/etc/passwd", FdKind::RegularRead)); // inherited from the shell
+        e.push(entry(4, "/src/big.iso", FdKind::RegularRead)); // the real source
+        e.push(entry(5, "/dst/big.iso", FdKind::RegularWrite));
+        let cur = select_current(&e).unwrap();
+        assert_eq!(
+            source_for(5, &cur.sources),
+            Some(PathBuf::from("/src/big.iso")),
+            "the highest read fd below the destination is the source"
+        );
+    }
+
+    #[test]
+    fn a_read_fd_above_the_destination_is_ignored() {
+        // An unrelated file opened after the destination cannot be this copy's source.
+        let mut e = stdio().to_vec();
+        e.push(entry(3, "/src/a.iso", FdKind::RegularRead));
+        e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
+        e.push(entry(9, "/some/later-read", FdKind::RegularRead));
+        let cur = select_current(&e).unwrap();
+        assert_eq!(source_for(4, &cur.sources), Some(PathBuf::from("/src/a.iso")));
+    }
+
+    #[test]
+    fn no_read_fd_below_the_destination_means_no_source() {
+        // Rather than guess, report no source: total stays unknown and the bar goes
+        // indeterminate instead of showing a ratio against the wrong file.
+        let mut e = stdio().to_vec();
+        e.push(entry(3, "/dst/a.iso", FdKind::RegularWrite));
+        e.push(entry(4, "/unrelated", FdKind::RegularRead));
+        let cur = select_current(&e).unwrap();
+        assert_eq!(source_for(3, &cur.sources), None);
+    }
+
+    #[test]
+    fn both_inherited_read_and_write_fds_are_excluded() {
+        // The two decoys together: fd 3 write (#6) and fd 4 read (#11).
+        let mut e = stdio().to_vec();
+        e.push(entry(3, "/tmp/decoy.log", FdKind::RegularWrite));
+        e.push(entry(4, "/etc/passwd", FdKind::RegularRead));
+        e.push(entry(5, "/src/a.iso", FdKind::RegularRead));
+        e.push(entry(6, "/dst/a.iso", FdKind::RegularWrite));
+        let cur = select_current(&e).unwrap();
+        assert_eq!(
+            cur.dests,
+            vec![(3, PathBuf::from("/tmp/decoy.log")), (6, PathBuf::from("/dst/a.iso"))]
+        );
+        // Given the destination the sampler picks by growth (fd 6), the source pairs to fd 5.
+        assert_eq!(source_for(6, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
 
     #[test]
@@ -157,8 +242,8 @@ mod tests {
         e.push(entry(3, "pipe:[99]", FdKind::Other)); // source fifo
         e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
         let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dest, PathBuf::from("/dst/a.iso"));
-        assert_eq!(cur.source, None);
+        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(4, &cur.sources), None);
     }
 
     #[test]
@@ -170,8 +255,8 @@ mod tests {
         e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
         e.push(entry(5, "/some/other-read", FdKind::RegularRead));
         let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dest, PathBuf::from("/dst/a.iso"));
-        assert_eq!(cur.source, Some(PathBuf::from("/src/a.iso")));
+        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(4, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
 
     #[test]
@@ -194,15 +279,34 @@ mod tests {
             entry(4, "/dst/a.iso", FdKind::RegularWrite),
         ];
         let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dest, PathBuf::from("/dst/a.iso"));
+        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+    }
+
+    #[test]
+    fn inherited_write_fd_is_reported_as_an_extra_candidate() {
+        // #6: `exec 3>decoy.log` before running cprog leaves fd 3 open for writing in cp, and it
+        // sorts *before* the real destination. Selection must not silently take the first one —
+        // both are surfaced so the sampler can disambiguate by growth.
+        let e = vec![
+            entry(3, "/tmp/decoy.log", FdKind::RegularWrite), // inherited from the shell
+            entry(4, "/src/a.iso", FdKind::RegularRead),
+            entry(5, "/dst/a.iso", FdKind::RegularWrite), // the real destination
+        ];
+        let cur = select_current(&e).unwrap();
+        assert_eq!(
+            cur.dests,
+            vec![(3, PathBuf::from("/tmp/decoy.log")), (5, PathBuf::from("/dst/a.iso"))],
+            "both write candidates are reported, in fd order"
+        );
+        assert_eq!(source_for(5, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
 
     #[test]
     fn dest_without_source_is_selected() {
         let e = vec![entry(4, "/dst/a.iso", FdKind::RegularWrite)];
         let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dest, PathBuf::from("/dst/a.iso"));
-        assert_eq!(cur.source, None);
+        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(4, &cur.sources), None);
     }
 
     // ---- LinuxProcSource against our own /proc (no external tools) --------------------

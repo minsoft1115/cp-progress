@@ -28,12 +28,26 @@ pub struct FooterGuard<W: Write> {
     shown: bool,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
+    /// Whether the last log bytes written left an unterminated line on screen (docs/ui.md
+    /// invariant 10). While true the footer is withheld — see [`Self::line_pending`].
+    line_pending: bool,
 }
 
 impl<W: Write> FooterGuard<W> {
     /// Wrap a writer with no footer shown yet.
     pub fn new(w: W) -> Self {
-        Self { w, shown: false, cursor_hidden: false }
+        Self { w, shown: false, cursor_hidden: false, line_pending: false }
+    }
+
+    /// Whether an unterminated log line is currently on screen.
+    ///
+    /// The footer draws from column 0 (`\r`), and the next erase clears the whole line, so
+    /// drawing it over a partial line makes that log text vanish. `cp` hits this routinely:
+    /// glibc's `error()` emits one error line as four separate writes, and the relay forwards
+    /// each fragment as it arrives (it must not wait for a newline). This is tracked on the
+    /// bytes actually written to the terminal, because stdout and stderr merge on one screen.
+    pub fn line_pending(&self) -> bool {
+        self.line_pending
     }
 
     /// Draw (or redraw in place) the footer line. Overwrites any current footer from column 0
@@ -77,14 +91,30 @@ impl<W: Write> FooterGuard<W> {
         self.w.flush()
     }
 
+    /// Draw the footer unless an unterminated log line is on screen (docs/ui.md invariant 10).
+    /// This is what the render loop's idle tick should call; [`Self::draw`] stays the primitive.
+    pub fn draw_unless_line_pending(&mut self, text: &str) -> io::Result<()> {
+        if self.line_pending {
+            return Ok(());
+        }
+        self.draw(text)
+    }
+
     /// Relay log bytes through the sole writer: erase the footer, write the bytes, then redraw
     /// the footer if one should remain (docs/testing.md C8).
+    ///
+    /// If the bytes do not end on a line boundary the footer is withheld, because drawing it
+    /// would overwrite the partial line and the next erase would take it off screen entirely
+    /// (docs/ui.md invariant 10). It comes back with the write that completes the line.
     pub fn write_log(&mut self, bytes: &[u8], footer: Option<&str>) -> io::Result<()> {
         self.erase()?;
         self.w.write_all(bytes)?;
+        if let Some(&last) = bytes.last() {
+            self.line_pending = last != b'\n';
+        }
         match footer {
-            Some(text) => self.draw(text),
-            None => self.w.flush(),
+            Some(text) if !self.line_pending => self.draw(text),
+            _ => self.w.flush(),
         }
     }
 }
@@ -202,6 +232,64 @@ mod tests {
         let after = buf.bytes().len();
         g.erase().unwrap(); // already erased -> noop
         assert_eq!(buf.bytes().len(), after);
+    }
+
+    #[test]
+    fn partial_log_line_withholds_the_footer() {
+        // #4 / docs/ui.md invariant 10: bytes not ending in a newline leave a partial line on
+        // screen. Drawing the footer would `\r` over it and the next erase would wipe it, so the
+        // footer is withheld until the line is finished.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.draw("F").unwrap();
+        let mark = buf.bytes().len();
+        g.write_log(b"cp: ", Some("F")).unwrap();
+        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[Kcp: ", "footer withheld, partial line intact");
+        assert!(g.line_pending(), "an unterminated line is on screen");
+    }
+
+    #[test]
+    fn footer_returns_once_the_line_is_finished() {
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.write_log(b"cp: ", Some("F")).unwrap();
+        assert!(g.line_pending());
+        let mark = buf.bytes().len();
+        g.write_log(b"cannot stat 'x': No such file\n", Some("F")).unwrap();
+        assert!(!g.line_pending(), "the newline completed the line");
+        // No erase first: nothing was drawn over the partial line, so it must survive.
+        assert_eq!(&buf.bytes()[mark..], b"cannot stat 'x': No such file\n\x1b[?25l\rF\x1b[K");
+    }
+
+    #[test]
+    fn split_cp_error_survives_on_screen() {
+        // The concrete failure from #4: glibc's error() emits one line as four writes. Every
+        // fragment must still be readable afterwards.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.draw("BAR").unwrap();
+        for frag in [&b"cp: "[..], b"error writing 'dst.bin'", b": No space left on device", b"\n"] {
+            g.write_log(frag, Some("BAR")).unwrap();
+        }
+        let out = buf.bytes();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("cp: error writing 'dst.bin': No space left on device"),
+            "the whole error must reach the screen uninterrupted: {text:?}"
+        );
+    }
+
+    #[test]
+    fn tick_redraw_is_suppressed_while_a_line_is_pending() {
+        // The render loop's idle tick must consult `line_pending` too, otherwise the periodic
+        // redraw would clobber the partial line that write_log deliberately left alone.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.write_log(b"partial", None).unwrap();
+        assert!(g.line_pending());
+        let mark = buf.bytes().len();
+        g.draw_unless_line_pending("F").unwrap();
+        assert!(buf.bytes()[mark..].is_empty(), "no footer drawn over the partial line");
     }
 
     #[test]

@@ -64,6 +64,16 @@ cprog -i big.iso backup.iso
 - 시그널(Ctrl-C 등): `cp`의 signaled-exit 의미론 보존, 요약 없음.
 - `cprog` 쪽 문제(샘플/렌더/정리): 경고까지만 — exit code는 언제나 `cp`에서.
 
+## 강제 종료 후 커서가 안 보일 때
+
+`cprog`는 정상 종료·에러·panic·시그널·Ctrl-Z 어느 경로로 끝나도 footer를 지우고 커서를 되살린다.
+**단 `kill -9`(SIGKILL)만은 예외**다 — 핸들러도 정리 코드도 돌 수 없어서, footer가 떠 있던 중이라면
+커서가 숨겨진 채로 남는다. 다음 한 줄로 복구한다:
+
+```bash
+tput cnorm
+```
+
 ## 환경 변수
 
 | 변수 | 효과 |

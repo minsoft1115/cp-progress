@@ -47,7 +47,7 @@ use proc::LinuxProcSource;
 use process::CommandSpec;
 use progress::{ProgressState, DEFAULT_RATE_WINDOW};
 use render::FooterGuard;
-use sampler::{LinuxStatSource, Sampler};
+use sampler::{LinuxStatSource, Sampler, Tick};
 use slowfile::SlowTimer;
 use term::TerminalSize;
 use ui::{footer_for, Style};
@@ -151,7 +151,13 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     let slow = Arc::new(Mutex::new(SlowTimer::new(threshold)));
     let progress: Arc<Mutex<Option<ProgressState>>> = Arc::new(Mutex::new(None));
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // Set by the render loop when we come back from a job-control stop, so the sampler drops the
+    // timing history that spans the suspend instead of averaging it in as dead time (#9).
+    let resumed = Arc::new(AtomicBool::new(false));
+    // Bounded on purpose: an unbounded queue removes the backpressure the pipe used to provide,
+    // so a terminal slower than cp's output accumulates in memory instead of making cp wait
+    // (docs/architecture.md "동시성"). Each item is one read, at most 8 KiB.
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(RELAY_QUEUE_DEPTH);
 
     // stdout carries `-v` (pulses the slow timer) and is relayed; stderr is relayed only.
     let stdout_reader = {
@@ -166,14 +172,25 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         let slow = Arc::clone(&slow);
         let progress = Arc::clone(&progress);
         let stop = Arc::clone(&stop);
+        let resumed = Arc::clone(&resumed);
         thread::spawn(move || {
             let (proc_src, stat_src) = (LinuxProcSource, LinuxStatSource);
             let mut sampler = Sampler::new(&proc_src, &stat_src, pid, DEFAULT_RATE_WINDOW);
             while !stop.load(Ordering::Relaxed) {
                 let now = Instant::now();
+                if resumed.swap(false, Ordering::Relaxed) {
+                    // cp was stopped alongside us, so the span across the suspend measured no
+                    // throughput. Drop it rather than report a near-zero rate for a whole window.
+                    sampler.reset_rate_history();
+                }
                 if lock_shared(&slow).is_slow(now) {
-                    if let Some(state) = sampler.tick(now) {
-                        *lock_shared(&progress) = Some(state);
+                    match sampler.tick(now) {
+                        Tick::Sample(state) => *lock_shared(&progress) = Some(state),
+                        // A read failed: keep the last value rather than make the bar flicker.
+                        Tick::Skip => {}
+                        // Nothing is being copied (the file finished, or we are between files),
+                        // so take the bar down instead of freezing it (#7).
+                        Tick::Idle => *lock_shared(&progress) = None,
                     }
                 } else {
                     *lock_shared(&progress) = None;
@@ -213,6 +230,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 // group again (Ctrl-Z then `fg`). If resumed in the background (Ctrl-Z then
                 // `bg`), suppress the footer so we don't take over the terminal (bug1/#1 seam).
                 suppressed = !term::is_foreground(libc::STDOUT_FILENO);
+                resumed.store(true, Ordering::Relaxed); // drop rate history spanning the stop (#9)
                 resized.store(true, Ordering::Relaxed); // requery size + redraw if not suppressed
                 continue;
             }
@@ -224,15 +242,24 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
             }
             match rx.recv_timeout(render_tick) {
                 Ok(bytes) => {
+                    // Drain whatever else is already queued and write it in one go: relaying each
+                    // chunk separately would repeat the erase -> write -> draw round trip per read
+                    // and let the queue outrun the terminal on a large recursive copy.
+                    let mut batch = bytes;
+                    while let Ok(more) = rx.try_recv() {
+                        batch.extend_from_slice(&more);
+                    }
                     let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
                     progress_shown |= footer.is_some();
-                    let _ = guard.write_log(&bytes, footer.as_deref());
+                    let _ = guard.write_log(&batch, footer.as_deref());
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
                     progress_shown |= footer.is_some();
                     let _ = match footer {
-                        Some(text) => guard.draw(&text),
+                        // Withheld while an unterminated log line is on screen, so the periodic
+                        // redraw cannot clobber it either (#4, docs/ui.md invariant 10).
+                        Some(text) => guard.draw_unless_line_pending(&text),
                         None => guard.erase(),
                     };
                 }
@@ -242,6 +269,11 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         }
         // guard's Drop erases the footer on the way out (docs/testing.md C7).
     }
+    // Nothing will read the relay channel from here on. With a bounded channel that matters: a
+    // reader blocked in `send` would never return and its join below would hang. Dropping the
+    // receiver makes those sends fail at once so the readers finish.
+    drop(rx);
+
     // The render loop is gone, so nothing acts on the SIGTSTP flag anymore. Hand Ctrl-Z back to
     // its default disposition (stop the group) so a suspend during teardown (join/wait) isn't
     // trapped-and-swallowed into a wedge (docs/process-model.md "정리").
@@ -259,6 +291,10 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // SAFETY: valid pid and signal; a race where cp already exited yields ESRCH, ignored.
         unsafe {
             libc::kill(pid as libc::pid_t, received);
+            // A *stopped* cp acts on nothing: the signal above just sits pending, its pipes stay
+            // open, and the joins below would never return. Continue it so it can actually take
+            // the signal and die (#5). Harmless no-op when cp is already running.
+            libc::kill(pid as libc::pid_t, libc::SIGCONT);
         }
     }
     stop.store(true, Ordering::Relaxed);
@@ -298,6 +334,11 @@ fn footer_now(
 pub(crate) fn lock_shared<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// How many captured chunks may sit unrendered before the reader threads block, restoring the
+/// pipe's backpressure. Each chunk is at most one 8 KiB read, so this caps the relay backlog at
+/// roughly half a megabyte (docs/architecture.md "동시성").
+const RELAY_QUEUE_DEPTH: usize = 64;
 
 /// Read a millisecond duration from an env var, falling back to `default_ms`.
 fn env_ms(var: &str, default_ms: u64) -> Duration {

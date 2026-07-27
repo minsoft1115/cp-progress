@@ -2,13 +2,15 @@
 //! (docs/capture-and-verbose.md).
 //!
 //! Reader threads own the captured pipes and forward every byte to the main (sole-writer)
-//! thread over a channel; the main thread relays them to the terminal. The stdout reader also
+//! thread over a bounded channel; the main thread relays them to the terminal. The bound is what
+//! keeps the pipe's backpressure intact — with an unbounded queue a terminal slower than `cp`'s
+//! output would just accumulate un-rendered log bytes in memory (docs/architecture.md "동시성"). The stdout reader also
 //! feeds line boundaries to the slow-file timer (docs/verbose) — the `-v` content itself is
 //! never parsed. Both relays are immediate: bytes are forwarded as read, never held waiting
 //! for a newline, so the live scroll stays live (docs/testing.md B9).
 
 use std::io::Read;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -17,7 +19,7 @@ use crate::verbose::LinePulse;
 
 /// Read `cp`'s stdout: detect `-v` line boundaries to pulse the slow timer, and relay every
 /// byte to the main writer. Stops on EOF or a closed relay channel.
-pub(crate) fn relay_stdout(mut reader: impl Read, slow: &Mutex<SlowTimer>, tx: &Sender<Vec<u8>>) {
+pub(crate) fn relay_stdout(mut reader: impl Read, slow: &Mutex<SlowTimer>, tx: &SyncSender<Vec<u8>>) {
     let mut pulse = LinePulse::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -36,7 +38,7 @@ pub(crate) fn relay_stdout(mut reader: impl Read, slow: &Mutex<SlowTimer>, tx: &
 }
 
 /// Relay a captured stream verbatim to the main writer (used for `cp`'s stderr).
-pub(crate) fn relay_bytes(mut reader: impl Read, tx: &Sender<Vec<u8>>) {
+pub(crate) fn relay_bytes(mut reader: impl Read, tx: &SyncSender<Vec<u8>>) {
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -61,7 +63,7 @@ mod tests {
     fn relays_partial_line_without_waiting_for_newline() {
         // docs/testing.md B9: bytes with no terminating newline are forwarded at once, not
         // held back waiting for a line boundary.
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx);
         drop(tx);
@@ -71,7 +73,7 @@ mod tests {
 
     #[test]
     fn completed_line_pulses_the_slow_timer() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         let t0 = Instant::now();
         relay_stdout(Cursor::new(b"'a' -> 'b'\n".to_vec()), &slow, &tx);
@@ -82,8 +84,47 @@ mod tests {
     }
 
     #[test]
+    fn a_full_queue_makes_the_relay_wait_rather_than_buffer() {
+        // #8: the channel is bounded so the pipe's backpressure survives. With an unbounded queue
+        // this relay would race to the end regardless of whether anyone is rendering the bytes,
+        // turning a slow terminal into unbounded memory growth.
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(2);
+        let payload = vec![b'x'; 8192 * 6]; // six reads, far more than the queue holds
+        let relay = std::thread::spawn(move || relay_bytes(Cursor::new(payload), &tx));
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!relay.is_finished(), "the relay must be waiting on a full queue, not buffering");
+
+        let mut received = 0usize;
+        while let Ok(chunk) = rx.recv_timeout(Duration::from_secs(2)) {
+            received += chunk.len();
+        }
+        relay.join().unwrap();
+        assert_eq!(received, 8192 * 6, "every byte still arrives once the queue drains");
+    }
+
+    #[test]
+    fn dropping_the_receiver_releases_a_blocked_relay() {
+        // Teardown relies on this: after the render loop the receiver is dropped, and a reader
+        // parked in `send` on the bounded queue must fail and return so its join is bounded.
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
+        let payload = vec![b'x'; 8192 * 8];
+        let relay = std::thread::spawn(move || relay_bytes(Cursor::new(payload), &tx));
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!relay.is_finished(), "blocked on the full queue");
+
+        drop(rx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !relay.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(relay.is_finished(), "dropping the receiver must end the relay");
+        relay.join().unwrap();
+    }
+
+    #[test]
     fn relay_bytes_forwards_verbatim() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(16);
         relay_bytes(Cursor::new(b"cp: error\n".to_vec()), &tx);
         drop(tx);
         let relayed: Vec<u8> = rx.into_iter().flatten().collect();

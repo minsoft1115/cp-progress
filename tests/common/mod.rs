@@ -152,3 +152,58 @@ pub fn cprog_exec(fifo: &std::path::Path, dst: &std::path::Path) -> (CString, Ve
     let envp = env.into_iter().map(|s| CString::new(s).unwrap()).collect();
     (prog, argv, envp)
 }
+
+/// Replay a captured terminal byte stream into the lines a user would actually see.
+///
+/// Only the sequences cprog emits for the footer matter here: `\r` (column 0), `\n` (next line)
+/// and `CSI K` (erase to end of line). Everything else that is an escape sequence is skipped and
+/// ordinary bytes overwrite whatever is under the cursor. This is what makes it possible to
+/// assert on *visible* output rather than on bytes that were written and then overdrawn.
+pub fn render_screen(bytes: &[u8]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut cur: Vec<u8> = Vec::new();
+    let mut col = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\r' => {
+                col = 0;
+                i += 1;
+            }
+            b'\n' => {
+                lines.push(String::from_utf8_lossy(&cur).into_owned());
+                cur.clear();
+                col = 0;
+                i += 1;
+            }
+            0x1b => {
+                if bytes[i..].starts_with(b"\x1b[K") {
+                    cur.truncate(col); // erase to end of line
+                    i += 3;
+                } else {
+                    // Skip any other CSI/escape sequence up to its final byte.
+                    i += 1;
+                    if bytes.get(i) == Some(&b'[') {
+                        i += 1;
+                    }
+                    while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            b => {
+                if col < cur.len() {
+                    cur[col] = b;
+                } else {
+                    cur.resize(col, b' ');
+                    cur.push(b);
+                }
+                col += 1;
+                i += 1;
+            }
+        }
+    }
+    lines.push(String::from_utf8_lossy(&cur).into_owned());
+    lines
+}

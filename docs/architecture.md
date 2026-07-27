@@ -66,6 +66,13 @@ enum Fatal   { Usage, CpSpawn(String), CpWait { pid: u32, source: String } }
 
 - **메인 스레드**: `cp` spawn·wait, 렌더 루프, footer writer 소유(=유일 기록자).
 - **capture 리더 스레드**(stdout/stderr): 캡처 바이트를 메인으로 넘김(중계·줄경계용).
+  - 채널은 **경계 있는 `sync_channel`** 이다. 무한 큐를 쓰면 파이프가 주던 백프레셔가 사라져,
+    터미널이 느릴 때(원격 ssh 등) 못 그린 로그가 메모리에 계속 쌓인다. 경계를 두면 리더가
+    막히고 → 파이프가 차고 → `cp`가 잠시 기다린다(= `cp | 느린소비자`의 원래 동작).
+  - 렌더 루프는 tick마다 큐를 **드레인해 한 번에 쓴다.** 청크마다 erase→write→draw를 왕복하지
+    않으므로 대량 소파일에서 처리량이 오른다.
+  - teardown 진입 시 **`rx`를 먼저 떨군다.** 경계 있는 채널에서는 아무도 안 읽으면 리더가 send에서
+    막혀 join이 안 끝나기 때문이다(‑ rx가 사라지면 send가 즉시 실패해 리더가 빠져나온다).
 - **sampler 스레드**: 느린 파일일 때 `/proc`+`stat` 폴링 → 공유 `ProgressState` 발행.
 
 `cp`는 스트림이 캡처되지만, 진행은 `/proc`/`stat`에서 **out-of-band**로 얻는다(‑v 내용
