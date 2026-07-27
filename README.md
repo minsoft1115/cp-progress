@@ -136,6 +136,7 @@ cp big.iso /mnt/backup/big.iso   # a progress bar appears if it gets slow
 - [Progress model](./docs/progress-model.md) · [Runtime model](./docs/runtime-model.md)
 - [Architecture](./docs/architecture.md) · [Process model](./docs/process-model.md)
 - [Testing](./docs/testing.md) · [Usage](./docs/usage.md) · [Dependencies](./docs/dependencies.md)
+- [Performance](./docs/performance.md) — measured overhead baseline, and how it is measured
 - [Exceptions](./docs/exceptions.md) — every runtime exception (signals, Ctrl-Z, passthrough
   triggers, progress limits), what cprog does about each, and where it is tested
 

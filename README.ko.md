@@ -127,6 +127,7 @@ cp big.iso /mnt/backup/big.iso   # 느려지면 진행바가 뜬다
 - [Progress model](./docs/progress-model.md) · [Runtime model](./docs/runtime-model.md)
 - [Architecture](./docs/architecture.md) · [Process model](./docs/process-model.md)
 - [Testing](./docs/testing.md) · [Usage](./docs/usage.md) · [Dependencies](./docs/dependencies.md)
+- [Performance](./docs/performance.md) — 오버헤드 실측 기준선과 재는 방법
 - [Exceptions](./docs/exceptions.md) — 런타임 예외 전수(시그널·Ctrl-Z·passthrough 조건·진행
   계산 한계)와 각각에 대한 동작, 그리고 어디서 테스트되는지
 
