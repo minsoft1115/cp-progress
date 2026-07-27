@@ -5,7 +5,7 @@
 //! preserve `cp`'s exit code, and stay byte-identical to `cp` when not managed.
 
 use std::ffi::OsStr;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 mod common;
 use common::TmpDir;
@@ -107,6 +107,86 @@ fn scan_error_falls_back_to_passthrough_byte_identical() {
     assert_eq!(ours.status.code(), theirs.status.code(), "same exit code as cp");
     assert_eq!(ours.stdout, theirs.stdout, "stdout byte-identical");
     assert_eq!(ours.stderr, theirs.stderr, "cp's own diagnosis, not a cprog error");
+}
+
+#[test]
+fn passthrough_execs_cp_replacing_the_process() {
+    // docs/process-model.md "Passthrough 생명주기" / testing.md E5: no version notice is due
+    // here (not informational), so cprog must exec cp rather than spawn it — same pid, no
+    // wrapper process left, `$!` and signals reach cp itself. A FIFO source keeps cp blocked
+    // in open() long enough to observe the replacement from /proc.
+    let tmp = TmpDir::new("execpid");
+    let fifo = tmp.path("src.fifo");
+    let dst = tmp.path("dst.bin");
+    let cfifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: a fresh path inside our own temp dir; failure is reported below.
+    assert_eq!(unsafe { libc::mkfifo(cfifo.as_ptr(), 0o600) }, 0, "mkfifo");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&fifo)
+        .arg(&dst)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // The exec is near-instant; poll briefly until the pid's comm reads "cp".
+    let mut comm = String::new();
+    for _ in 0..200 {
+        comm = std::fs::read_to_string(format!("/proc/{}/comm", child.id())).unwrap_or_default();
+        if comm.trim_end() == "cp" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    // Unblock cp: open the write end and close it at once -> EOF -> empty copy, exit 0.
+    drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+    let status = child.wait().unwrap();
+
+    assert_eq!(comm.trim_end(), "cp", "the spawned pid must have been replaced by cp");
+    assert!(status.success(), "the empty copy still succeeds: {status:?}");
+}
+
+#[test]
+fn verbose_to_a_closed_pipe_dies_of_sigpipe_like_cp() {
+    // exceptions A7 / testing.md E6. Rust ignores SIGPIPE in cprog itself and an ignored
+    // disposition survives exec — left alone, the exec'd cp would report a write error and
+    // exit 1 instead of dying silently of SIGPIPE the way plain cp does in a pipeline.
+    // Both must end the same way, stderr included.
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::process::ExitStatusExt;
+    let tmp = TmpDir::new("sigpipe");
+    let src = tmp.path("src.bin");
+    std::fs::write(&src, b"data").unwrap();
+
+    let run = |prog: &str, dst: &std::path::Path| {
+        // A pipe whose read end is closed: the first stdout write (cp's -v line) breaks.
+        let mut fds = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+        assert_eq!(unsafe { libc::close(fds[0]) }, 0, "close read end");
+        // SAFETY: fds[1] is a fresh, owned pipe fd handed to the child as its stdout.
+        let stdout = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+        Command::new(prog)
+            .arg("-v")
+            .arg(&src)
+            .arg(dst)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .output()
+            .expect("run")
+    };
+    let ours = run(env!("CARGO_BIN_EXE_cprog"), &tmp.path("d_mine"));
+    let theirs = run("cp", &tmp.path("d_theirs"));
+
+    assert_eq!(
+        ours.status.signal(),
+        Some(libc::SIGPIPE),
+        "cprog (exec'd into cp) must die of SIGPIPE, not report a write error: {:?}",
+        String::from_utf8_lossy(&ours.stderr)
+    );
+    assert_eq!(ours.status.signal(), theirs.status.signal(), "same signal death as plain cp");
+    assert_eq!(ours.stderr, theirs.stderr, "no extra error output");
 }
 
 #[test]

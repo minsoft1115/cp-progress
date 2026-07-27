@@ -53,7 +53,15 @@ pub fn detect() -> Capabilities {
         linux_proc: proc_available(),
         stdbuf: stdbuf_available(),
         foreground: is_foreground(libc::STDOUT_FILENO),
+        passthrough_forced: passthrough_forced(),
     }
+}
+
+/// Whether `CPROG_PASSTHROUGH` is set — any value counts, the same value-agnostic rule as
+/// `CI` (B6) and `NO_COLOR` (F10). The user's explicit ask for cprog to get out of the way,
+/// read both here (mode decision) and in dispatch (version-notice suppression).
+pub fn passthrough_forced() -> bool {
+    std::env::var_os("CPROG_PASSTHROUGH").is_some()
 }
 
 /// Whether we are the foreground process group of our controlling terminal — i.e. not a

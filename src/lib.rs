@@ -96,22 +96,37 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
         Some(insp) => (plan::decide(&term::detect(), insp.interactive), insp.verbose),
     };
 
-    let outcome = match mode {
-        RunMode::Passthrough => run_passthrough(cp_args),
+    match mode {
         RunMode::ManagedTui => run_managed(cp_args, verbose_present),
-    };
-
-    // `--help`/`--version` reach `cp` untouched, which leaves nothing naming cprog itself. Say so
-    // afterwards — on stderr, and only on a terminal, so redirected output stays byte-identical
-    // (#15, docs/runtime-model.md "버전 표시"). Best-effort like every other write of ours.
-    let notice = version_notice(informational, io::stderr().is_terminal(), term::detect_style().color);
-    if let Some(text) = notice {
-        let _ = writeln!(io::stderr(), "{text}");
+        RunMode::Passthrough => {
+            // `--help`/`--version` reach `cp` untouched, which leaves nothing naming cprog
+            // itself, so one line is appended afterwards — on stderr, only on a terminal, and
+            // not under CPROG_PASSTHROUGH, the user's explicit "add nothing at all" (#15,
+            // docs/runtime-model.md "버전 표시"). That is the one passthrough that must
+            // outlive cp; every other one execs cp in place, so the shell observes cp itself —
+            // exit code, signals, job control and `$!` — with no relaying
+            // (docs/process-model.md "Passthrough 생명주기").
+            let notice = version_notice(
+                informational && !term::passthrough_forced(),
+                io::stderr().is_terminal(),
+                term::detect_style().color,
+            );
+            match notice {
+                Some(text) => {
+                    let outcome = run_passthrough(cp_args);
+                    // Best-effort like every other write of ours.
+                    let _ = writeln!(io::stderr(), "{text}");
+                    outcome
+                }
+                None => run_passthrough_exec(cp_args),
+            }
+        }
     }
-    outcome
 }
 
-/// Run `cp` with inherited streams, byte-identical to `cp`, and preserve its exit disposition.
+/// Run `cp` with inherited streams and wait for it, preserving its exit disposition. Only used
+/// when cprog must outlive `cp` to append the version notice; every other passthrough goes
+/// through [`run_passthrough_exec`].
 fn run_passthrough(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
     let spec = CommandSpec::passthrough(cp_args);
     let mut child = process::spawn(&spec).map_err(|e| Fatal::CpSpawn(e.to_string()))?;
@@ -120,6 +135,14 @@ fn run_passthrough(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
         .wait()
         .map_err(|e| Fatal::CpWait { pid, source: e.to_string() })?;
     Ok(disposition(status))
+}
+
+/// Replace cprog with `cp` (docs/process-model.md "Passthrough 생명주기"): on success this
+/// never returns and the shell observes `cp` itself. Only an exec failure — e.g. no `cp` on
+/// PATH — comes back, as the same [`Fatal::CpSpawn`] the spawn path reports.
+fn run_passthrough_exec(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
+    let spec = CommandSpec::passthrough(cp_args);
+    Err(Fatal::CpSpawn(process::exec_replace(&spec).to_string()))
 }
 
 /// Run `cp` under the managed TUI (docs/process-model.md "Managed 생명주기").

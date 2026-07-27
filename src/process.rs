@@ -58,6 +58,32 @@ impl CommandSpec {
     }
 }
 
+/// Replace the current process with the one described by `spec` (passthrough only): on
+/// success this never returns — the pid cprog held *is* `cp` from here on, so exit codes,
+/// signals, job control and `$!` reach the shell with no relaying (docs/process-model.md
+/// "Passthrough 생명주기"). Only the exec failure (e.g. no `cp` on PATH) comes back.
+///
+/// Two deliberate differences from [`spawn`]:
+/// * **No `PR_SET_PDEATHSIG`** — there is no cprog left whose death could orphan `cp`, and a
+///   setting inherited across the exec would tie `cp`'s life to the *shell* instead, which a
+///   plain `cp` does not have (docs/exceptions.md C4).
+/// * **SIGPIPE is restored to its default first.** The Rust runtime ignores SIGPIPE, an
+///   ignored disposition survives exec, and an exec'd `cp` that cannot die of SIGPIPE reports
+///   write errors instead — visibly different from plain `cp` in a pipeline (exceptions A7).
+pub fn exec_replace(spec: &CommandSpec) -> io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new(&spec.program);
+    cmd.args(&spec.args);
+    for (key, value) in &spec.env {
+        cmd.env(key, value);
+    }
+    // SAFETY: restoring a signal disposition to its default is a valid, async-signal-safe call.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+    cmd.exec()
+}
+
 /// Spawn the child described by `spec`. On success, `child.id()` is `cp`'s pid.
 pub fn spawn(spec: &CommandSpec) -> io::Result<Child> {
     let mut cmd = Command::new(&spec.program);
