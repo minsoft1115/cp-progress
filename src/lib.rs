@@ -39,7 +39,7 @@ pub(crate) mod messages;
 pub(crate) mod exit;
 
 use std::ffi::OsString;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 
 use args::ArgError;
 use exit::{disposition, finalize, ExitDisposition};
-use messages::{summary, Fatal};
+use messages::{summary, version_notice, Fatal};
 use plan::RunMode;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGWINCH};
 use proc::LinuxProcSource;
@@ -87,6 +87,7 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
         Err(ArgError::Scan(_)) => None,
     };
 
+    let informational = inspection.as_ref().is_some_and(|insp| insp.informational);
     let (mode, verbose_present) = match &inspection {
         None => (RunMode::Passthrough, false),
         // --help/--version just print and exit; nothing to monitor, so pass through
@@ -95,10 +96,19 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
         Some(insp) => (plan::decide(&term::detect(), insp.interactive), insp.verbose),
     };
 
-    match mode {
+    let outcome = match mode {
         RunMode::Passthrough => run_passthrough(cp_args),
         RunMode::ManagedTui => run_managed(cp_args, verbose_present),
+    };
+
+    // `--help`/`--version` reach `cp` untouched, which leaves nothing naming cprog itself. Say so
+    // afterwards — on stderr, and only on a terminal, so redirected output stays byte-identical
+    // (#15, docs/runtime-model.md "버전 표시"). Best-effort like every other write of ours.
+    let notice = version_notice(informational, io::stderr().is_terminal(), term::detect_style().color);
+    if let Some(text) = notice {
+        let _ = writeln!(io::stderr(), "{text}");
     }
+    outcome
 }
 
 /// Run `cp` with inherited streams, byte-identical to `cp`, and preserve its exit disposition.

@@ -53,6 +53,9 @@
 - PTY 기반(`openpty`) 테스트: passthrough 출력이 `cp`와 바이트 동일; footer가 종료 전 지워짐;
   `SIGWINCH`가 재배치를 유발(+ 시그널 유실 시 폴백 재조회); `cprog`에 시그널이 오면 signaled-
   exit 보존 + footer 정리.
+- **버전 표시(#15):** `--help`/`--version`이 TTY에서는 cprog 한 줄을 stderr에 덧붙이고, 캡처된
+  상태(파이프·리다이렉트)에서는 **stdout·stderr 둘 다 `cp`와 바이트 동일**함을 확인한다. 후자가
+  핵심이다 — `alias cp='cprog'` 때문에 시스템의 모든 `cp --version | …`이 이 경로를 탄다.
 - **passthrough env 순수성:** managed가 쓰는 `QUOTING_STYLE=shell-escape`이 passthrough엔 안
   걸려, `cp`의 stdout·**에러 메시지(로케일 포함)** 까지 바이트 동일. (managed는 `LC_ALL=C`를
   걸지 않는다 — cprog는 `-v`를 파싱하지 않아 로케일 고정이 불필요하고, 비-ASCII 파일명을 보존한다.)
@@ -143,6 +146,7 @@
 | D3 | `cprog`가 직접 시그널(Ctrl-C) 받음 | footer 정리 + 같은 시그널 재현 | 통합 |
 | D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛/통합 |
 | D5 | 인자 없음 | `Fatal::Usage`, exit 1 | 유닛 |
+| D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_line`) + 통합(PTY/비-TTY 양쪽) |
 | D6 | `cp` 정상 exit code n | 그대로 n 반환 | 유닛 + 통합 |
 | D7 | `stdbuf`가 `cp`를 exec | PID 안정 → `/proc/<pid>/fd` 유효 | 통합 |
 

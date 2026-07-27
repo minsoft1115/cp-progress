@@ -78,6 +78,9 @@ pub fn summary(
     }
 }
 
+/// SGR: dim — used for the version notice so it reads as an aside, not as cp output.
+const DIM: &str = "\x1b[2m";
+
 /// Wrap `line` in `sgr`…reset when `color` is enabled, else return it plain.
 fn colorize(line: String, sgr: &str, color: bool) -> String {
     if color {
@@ -95,6 +98,29 @@ fn format_duration(d: Duration) -> String {
     } else {
         format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
     }
+}
+
+/// A short notice naming cprog itself, appended after `cp`'s output for informational
+/// invocations (`--help` / `--version`), or `None` when it must stay silent.
+///
+/// `cprog` has no options of its own — `--version` reaches `cp` like any other argument — so
+/// without this a user has no way to tell which wrapper build is running, or that one is running
+/// at all. It is gated on `stderr_tty` because everywhere else the passthrough contract applies:
+/// redirected and piped output must stay byte-identical to `cp`, and a script doing
+/// `cp --version | tail -1` must keep working. Like the exit summary, it goes to stderr so stdout
+/// stays `cp`'s (docs/runtime-model.md "버전 표시").
+///
+/// Two touches keep it from reading as one more paragraph of cp's own output: a blank line ahead
+/// of it, and dim text when colour is allowed. A horizontal rule would be the alternative and is
+/// deliberately not used — it would need the terminal width, which this path never queries, and
+/// cprog draws no decoration anywhere else.
+pub fn version_notice(informational: bool, stderr_tty: bool, color: bool) -> Option<String> {
+    if !informational || !stderr_tty {
+        return None;
+    }
+    let line = format!("cprog {} — {}", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_REPOSITORY"));
+    // The blank line stays outside the SGR run so the escapes wrap only the text.
+    Some(format!("\n{}", colorize(line, DIM, color)))
 }
 
 #[cfg(test)]
@@ -125,6 +151,54 @@ mod tests {
         let f = Fatal::CpWait { pid: 42, source: "ECHILD".into() };
         assert_eq!(f.to_string(), "cprog: failed to wait for cp (pid 42): ECHILD");
         assert_eq!(f.code(), 1);
+    }
+
+    // ---- version notice (#15, docs/runtime-model.md "버전 표시") ----------------------
+
+    #[test]
+    fn version_notice_names_cprog_and_its_repository() {
+        let n = version_notice(true, true, false).expect("shown for --help/--version on a tty");
+        assert!(n.contains("cprog "), "names the wrapper, not cp: {n:?}");
+        assert!(n.contains(env!("CARGO_PKG_VERSION")), "carries the version: {n:?}");
+        assert!(n.contains("github.com"), "points somewhere useful: {n:?}");
+    }
+
+    #[test]
+    fn version_notice_is_separated_by_a_blank_line() {
+        // Without it the notice reads as one more paragraph of cp's own output, which is exactly
+        // what it is not.
+        let n = version_notice(true, true, false).unwrap();
+        assert!(n.starts_with('\n'), "a blank line comes first: {n:?}");
+        assert_eq!(n.lines().filter(|l| !l.is_empty()).count(), 1, "still one line: {n:?}");
+    }
+
+    #[test]
+    fn version_notice_is_dim_when_colour_is_allowed() {
+        let dim = version_notice(true, true, true).unwrap();
+        assert!(dim.contains("\x1b[2m") && dim.ends_with("\x1b[0m"), "dimmed: {dim:?}");
+        // The separator must sit outside the escape run, or the blank line joins the SGR span.
+        assert!(dim.starts_with("\n\x1b[2m"), "escapes wrap the text only: {dim:?}");
+    }
+
+    #[test]
+    fn version_notice_is_plain_when_colour_is_off() {
+        // NO_COLOR / TERM=dumb reach here through the same Style the summary uses.
+        let plain = version_notice(true, true, false).unwrap();
+        assert!(!plain.contains('\x1b'), "no escapes at all: {plain:?}");
+    }
+
+    #[test]
+    fn version_notice_is_absent_for_an_ordinary_copy() {
+        // Only informational invocations get it; a real copy already has the exit summary.
+        assert_eq!(version_notice(false, true, true), None);
+    }
+
+    #[test]
+    fn version_notice_is_absent_when_stderr_is_not_a_tty() {
+        // The passthrough contract: redirected or piped output stays byte-identical to `cp`,
+        // so `cp --version 2>/dev/null` and `cp --version | tail -1` are unaffected.
+        assert_eq!(version_notice(true, false, true), None);
+        assert_eq!(version_notice(false, false, false), None);
     }
 
     // ---- exit summary (docs/ui.md examples 4/5, runtime-model) -----------------------

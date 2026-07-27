@@ -204,9 +204,11 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
 }
 
 #[test]
-fn help_over_pty_passes_through_without_summary() {
+fn help_over_pty_passes_through_but_names_cprog() {
     // `--help` prints and exits without copying; even in a terminal cprog must pass through —
     // no footer, no `✓ done` summary (docs/bugs bug2). Over a PTY managed would otherwise engage.
+    // It does append one line naming itself, because `--version`/`--help` reach `cp` untouched
+    // and would otherwise leave no trace of the wrapper at all (#15).
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
     let pty = openpty(Some(&ws), None).unwrap();
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
@@ -239,4 +241,11 @@ fn help_over_pty_passes_through_without_summary() {
     assert_eq!(status.code(), Some(0));
     assert!(text.contains("Usage: cp"), "cp's help was shown: {:.80?}", text);
     assert!(!text.contains('✓'), "no summary for --help: {text:?}");
+    // The version line is the last thing on screen, after cp has had its say.
+    let line = format!("cprog {}", env!("CARGO_PKG_VERSION"));
+    assert!(text.contains(&line), "cprog names itself on a terminal: {text:?}");
+    assert!(
+        text.rfind(&line) > text.rfind("Usage: cp"),
+        "the line comes after cp's output, not before it: {text:?}"
+    );
 }
