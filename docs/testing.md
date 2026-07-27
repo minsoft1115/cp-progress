@@ -94,9 +94,9 @@
 | # | 예외 | 기대 동작 | 방식 |
 |---|---|---|---|
 | A1 | `copy_file_range`로 `fdinfo:pos`가 0 | `pos`가 아니라 `st_size`를 읽음(설계 고정) | 유닛(sampler가 size 소스 사용) |
-| A2 | `fallocate`로 `st_size`가 즉시 full | `st_blocks*512`로 폴백(실제 쓰기 반영) | 유닛(‑ size=full, blocks<full 픽스처) |
+| A2 | `fallocate`로 `st_size`가 즉시 full | **한계로 수용** — 바가 즉시 100%. `cp`엔 선할당 경로가 없어 도달 불가(#12) | 유닛(한계를 명시하는 테스트) |
 | A3 | reflink/CoW로 즉시 완료 | 첫 샘플 전 `done==total` → 바 100% 또는 skip | 유닛 |
-| A4 | sparse 파일(‑ `st_size` > 실제) | %는 유의미, `st_blocks` 폴백, rate 과대 허용 | 유닛 + 문서 한계 |
+| A4 | sparse 파일(‑ `st_size` > 실제) | size로 재므로 %는 정확, rate만 과대 허용 | 유닛 + 문서 한계 |
 | A5 | 총량 0(빈 원본) | `0/0` div-by-zero 금지 → 100% 또는 indeterminate | 유닛 |
 | A6 | `done > total`(오버슈트) | %를 100으로 clamp | 유닛 |
 | A7 | 두 샘플 간 증가 0/음수 | `rate≈0`, `eta=--:--` | 유닛 |
