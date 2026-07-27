@@ -128,11 +128,12 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
                     }
                     // After the resize, wait to observe a narrow redraw, then stop feeding so
                     // cp reaches EOF and cprog exits — no dependence on copy speed.
-                    Some(off) if !narrow_seen => {
-                        if footer_widths(&out[off..]).iter().any(|&w| w <= 30) {
-                            narrow_seen = true;
-                            stop_feed.store(true, Ordering::Relaxed);
-                        }
+                    Some(off)
+                        if !narrow_seen
+                            && footer_widths(&out[off..]).iter().any(|&w| w <= 30) =>
+                    {
+                        narrow_seen = true;
+                        stop_feed.store(true, Ordering::Relaxed);
                     }
                     _ => {}
                 }
