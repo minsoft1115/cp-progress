@@ -149,8 +149,10 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
             0 => break,
             n => {
                 out.extend_from_slice(&buf[..n]);
-                // The -v line means cp has started (and is now blocked reading the FIFO).
-                if !sent && out.windows(2).any(|w| w == b"->") {
+                // Without `-v` nothing from cp reaches the terminal (#20), so readiness is the
+                // footer engaging instead: the cursor-hide it emits on its first draw means the
+                // slow timer fired, which means cp is running and pulsing.
+                if !sent && common::contains(&out, b"\x1b[?25l") {
                     kill(cprog_pid, Signal::SIGTERM).unwrap(); // cprog only; cp keeps blocking
                     sent = true;
                 }
@@ -229,7 +231,9 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
             0 => break,
             n => {
                 out.extend_from_slice(&buf[..n]);
-                if !sent && out.windows(2).any(|w| w == b"->") {
+                // Readiness is the footer's cursor-hide, not a `-v` line: without `-v`
+                // cp's output is never relayed (#20).
+                if !sent && common::contains(&out, b"\x1b[?25l") {
                     kill(cprog_pid, Signal::SIGINT).unwrap(); // cprog only; cp keeps blocking
                     sent = true;
                 }

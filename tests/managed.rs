@@ -31,6 +31,7 @@ fn managed_streams_verbose_and_draws_footer_over_pty() {
     let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg("-v") // #20: relaying only happens when the user asked for it
         .arg(&src)
         .arg(&dst)
         .env("TERM", "xterm")
@@ -102,6 +103,7 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
     // and the master would never see EOF. Dropping it here leaves the child as the sole holder.
     let mut child = {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cprog"));
+        cmd.arg("-v"); // #20: the relay under test only runs when `-v` was actually requested
         for i in 0..N {
             let f = tmp.0.join(format!("src{i}.bin"));
             std::fs::write(&f, vec![0u8; EACH]).unwrap();
