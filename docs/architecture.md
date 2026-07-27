@@ -29,7 +29,7 @@ main
 | `lib.rs` | 상위 오케스트레이션, `run()` |
 | `args.rs` | 인자 검증 + interactive/`-v` 최소 검사 |
 | `plan.rs` | capabilities 감지 + `RunMode` 결정 |
-| `capture.rs` | `cp` stdout/stderr 캡처 + 로그 영역 중계(sole writer) |
+| `capture.rs` | `cp` stdout/stderr 캡처 + 로그 영역 중계(sole writer). stdout 중계는 **사용자가 `-v`를 줬을 때만**(‑ 안 줬으면 줄 경계만 세고 버림), stderr는 항상 |
 | `verbose.rs` | 캡처 스트림의 **줄 경계** 감지 = "새 항목" 펄스 (내용 파싱 안 함) |
 | `slowfile.rs` | 펄스 + `Clock` → "현재 파일이 느린가" 판정 |
 | `proc.rs` | `/proc/<pid>/fd` readlink로 현재 대상/원본 경로 |
@@ -65,7 +65,7 @@ enum Fatal   { Usage, CpSpawn(String), CpWait { pid: u32, source: String } }
 ## 동시성
 
 - **메인 스레드**: `cp` spawn·wait, 렌더 루프, footer writer 소유(=유일 기록자).
-- **capture 리더 스레드**(stdout/stderr): 캡처 바이트를 메인으로 넘김(중계·줄경계용).
+- **capture 리더 스레드**(stdout/stderr): 줄 경계를 세어 slow timer를 두드리고, **중계할 때만** 바이트를 메인으로 넘김(‑ stdout은 사용자가 `-v`를 줬을 때만, stderr는 항상).
   - 채널은 **경계 있는 `sync_channel`** 이다. 무한 큐를 쓰면 파이프가 주던 백프레셔가 사라져,
     터미널이 느릴 때(원격 ssh 등) 못 그린 로그가 메모리에 계속 쌓인다. 경계를 두면 리더가
     막히고 → 파이프가 차고 → `cp`가 잠시 기다린다(= `cp | 느린소비자`의 원래 동작).
