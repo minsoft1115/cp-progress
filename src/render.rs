@@ -64,6 +64,19 @@ impl<W: Write> FooterGuard<W> {
         self.w.flush()
     }
 
+    /// Restore the terminal for a job-control suspend (`SIGTSTP` / Ctrl-Z): erase the footer and
+    /// show the cursor, and reset our state to "fresh" so that after the process is resumed the
+    /// next [`draw`](Self::draw) re-hides the cursor and redraws the footer. Unlike `Drop`, the
+    /// guard keeps living across the stop.
+    pub fn suspend_restore(&mut self) -> io::Result<()> {
+        self.erase()?; // footer gone, `shown` back to false
+        if self.cursor_hidden {
+            self.cursor_hidden = false;
+            self.w.write_all(SHOW_CURSOR)?;
+        }
+        self.w.flush()
+    }
+
     /// Relay log bytes through the sole writer: erase the footer, write the bytes, then redraw
     /// the footer if one should remain (docs/testing.md C8).
     pub fn write_log(&mut self, bytes: &[u8], footer: Option<&str>) -> io::Result<()> {
@@ -158,6 +171,21 @@ mod tests {
         let mark = buf.bytes().len();
         g.draw("BB").unwrap();
         assert_eq!(&buf.bytes()[mark..], b"\rBB\x1b[K");
+    }
+
+    #[test]
+    fn suspend_restore_shows_cursor_then_redraw_re_hides() {
+        // bug2: on SIGTSTP the footer is erased and the cursor shown, and state resets so that
+        // after resume the next draw re-hides the cursor and redraws the footer.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.draw("F").unwrap(); // hide cursor + footer
+        let mark = buf.bytes().len();
+        g.suspend_restore().unwrap();
+        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K\x1b[?25h", "erase footer, then show cursor");
+        let mark2 = buf.bytes().len();
+        g.draw("F").unwrap(); // resumed
+        assert_eq!(&buf.bytes()[mark2..], b"\x1b[?25l\rF\x1b[K", "redraw re-hides + draws");
     }
 
     #[test]

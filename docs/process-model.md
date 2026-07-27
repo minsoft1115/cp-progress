@@ -57,8 +57,15 @@
 
 - footer는 **모든 종료 경로** — 정상 반환, `Fatal`, panic, 시그널 — 에서 지워진다.
   `FooterGuard`의 `Drop`이 지우고, 요약 전 명시적 best-effort clear도 한다.
+- **일시정지(Ctrl-Z / `SIGTSTP`)** 도 정리한다: 렌더 루프가 `FooterGuard::suspend_restore`로
+  footer를 지우고 커서를 복원한 뒤 `SIGSTOP`으로 실제 정지하고(‑ `SIGTSTP` 플래그 핸들러는 유지),
+  재개(`SIGCONT`) 시 다음 tick에서 커서 재숨김 + footer 재그림. `Drop`은 정지가 아니라 종료에서만
+  돌기 때문.
+- **백그라운드 재개(`bg`) 시 footer 억제는 단방향**이다: 재개 시점에 전경이 아니면 footer를
+  끄고, 이후 `fg`로 전경에 복귀해도 다시 켜지 않는다(전경 여부는 suspend-재개 시에만 재확인 —
+  "모드는 확정 후 안 바뀐다"와 같은 단순화). 또 한 번 Ctrl-Z 후 `fg` 하면 footer가 복구된다.
 - capture 리더·sampler 스레드는 정지 신호 후 join. join이 느려도 유계이며 exit code를 안 막음.
-- 정리 문제는 `Warning`일 뿐 `cp` 결과를 바꾸지 않음.
+- 정리 문제는 `cp` 결과를 바꾸지 않는다.
 
 ## 시그널 보존 종료
 

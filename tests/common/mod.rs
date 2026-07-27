@@ -1,7 +1,15 @@
 //! Shared helpers for the PTY-based integration tests.
+//!
+//! Not every test crate uses every helper, so unused-warnings are allowed here.
+#![allow(dead_code)]
 
+use std::ffi::CString;
 use std::fs::File;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::RawFd;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Read one chunk from a PTY master, retrying on EINTR and treating EIO (the slave side fully
 /// closed) or any other error as end-of-stream. Returns 0 at EOF. This keeps the integration
@@ -14,4 +22,110 @@ pub fn read_retry(master: &mut File, buf: &mut [u8]) -> usize {
             Err(_) => 0,
         };
     }
+}
+
+/// A throwaway temp directory, removed on drop.
+pub struct TmpDir(pub std::path::PathBuf);
+impl TmpDir {
+    pub fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("cprog_it_{}_{}", std::process::id(), tag));
+        std::fs::create_dir_all(&dir).unwrap();
+        TmpDir(dir)
+    }
+}
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Whether `needle` occurs anywhere in `hay`.
+pub fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Index of the last occurrence of `needle` in `hay`.
+pub fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    (0..=hay.len().saturating_sub(needle.len())).rev().find(|&i| &hay[i..i + needle.len()] == needle)
+}
+
+/// Poll a fd for readability, up to `ms` milliseconds.
+pub fn readable(fd: RawFd, ms: i32) -> bool {
+    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    unsafe { libc::poll(&mut pfd, 1, ms) };
+    pfd.revents & libc::POLLIN != 0
+}
+
+/// Non-blocking drain of a PTY master into `out` until `deadline`, or until `marker` (searched
+/// from the given index) appears — whichever comes first.
+pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant, marker: Option<(usize, &[u8])>) {
+    let mut buf = [0u8; 8192];
+    while Instant::now() < deadline {
+        if let Some((from, m)) = marker {
+            if from <= out.len() && contains(&out[from..], m) {
+                return;
+            }
+        }
+        if readable(fd, 50) {
+            match master.read(&mut buf) {
+                Ok(0) => return,
+                Ok(n) => out.extend_from_slice(&buf[..n]),
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// A throttled writer feeding a FIFO to keep a `cp` copy slow. Stops and joins on drop.
+pub struct Feeder {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+impl Feeder {
+    pub fn start(fifo: std::path::PathBuf) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let s = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            let chunk = vec![0u8; 64 * 1024];
+            while !s.load(Ordering::Relaxed) {
+                if w.write_all(&chunk).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        Feeder { stop, handle: Some(handle) }
+    }
+}
+impl Drop for Feeder {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// The program path + argv + envp (as owned `CString`s) to exec `cprog` copying `fifo` -> `dst`
+/// with brisk managed-mode timings and no `CI`. The caller builds the NULL-terminated pointer
+/// arrays locally so the pointers stay valid across `fork`.
+pub fn cprog_exec(fifo: &std::path::Path, dst: &std::path::Path) -> (CString, Vec<CString>, Vec<CString>) {
+    let prog = CString::new(env!("CARGO_BIN_EXE_cprog")).unwrap();
+    let argv = vec![
+        CString::new("cprog").unwrap(),
+        CString::new(fifo.to_str().unwrap()).unwrap(),
+        CString::new(dst.to_str().unwrap()).unwrap(),
+    ];
+    let mut env = vec![
+        "TERM=xterm".to_string(),
+        "CPROG_SLOW_THRESHOLD_MS=1".to_string(),
+        "CPROG_SAMPLE_INTERVAL_MS=10".to_string(),
+        "CPROG_RENDER_TICK_MS=10".to_string(),
+    ];
+    if let Ok(p) = std::env::var("PATH") {
+        env.push(format!("PATH={p}"));
+    }
+    let envp = env.into_iter().map(|s| CString::new(s).unwrap()).collect();
+    (prog, argv, envp)
 }

@@ -42,7 +42,7 @@ use args::ArgError;
 use exit::{disposition, finalize, ExitDisposition};
 use messages::{summary, Fatal};
 use plan::RunMode;
-use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGWINCH};
+use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGWINCH};
 use proc::LinuxProcSource;
 use process::CommandSpec;
 use progress::{ProgressState, DEFAULT_RATE_WINDOW};
@@ -133,6 +133,11 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     let resized = Arc::new(AtomicBool::new(true)); // true -> query size on first render
     let _ = signal_hook::flag::register(SIGWINCH, Arc::clone(&resized));
 
+    // SIGTSTP (Ctrl-Z): flag it and handle it in the render loop so the terminal is restored
+    // (cursor shown, footer erased) *before* we actually stop, and redrawn on resume. bug2/#2.
+    let suspend = Arc::new(AtomicBool::new(false));
+    let _ = signal_hook::flag::register(SIGTSTP, Arc::clone(&suspend));
+
     let style = term::detect_style();
     let threshold = env_ms(
         "CPROG_SLOW_THRESHOLD_MS",
@@ -181,6 +186,9 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     // Whether the footer ever engaged (a slow file was actually monitored). Gates the summary:
     // if cp did nothing worth showing (e.g. --help, an instant exit), we stay quiet.
     let mut progress_shown = false;
+    // Set once we resume from a suspend in the background (Ctrl-Z then `bg`): the footer is then
+    // suppressed so a background job never takes over the terminal (bug1/#1 seam).
+    let mut suppressed = false;
     {
         let mut guard = FooterGuard::new(io::stdout().lock());
         let mut size = TerminalSize::new(80, 24);
@@ -191,6 +199,21 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
             if received_signal.load(Ordering::Relaxed) != 0 {
                 break;
             }
+            // Ctrl-Z (SIGTSTP): restore the terminal, then actually stop. We stop with SIGSTOP so
+            // the SIGTSTP flag handler stays installed for the next suspend; on resume (SIGCONT)
+            // we re-query the size and redraw. Without this, the default stop would leave the
+            // cursor hidden and a stale footer on screen (bug2/#2).
+            if suspend.swap(false, Ordering::Relaxed) {
+                let _ = guard.suspend_restore();
+                // SAFETY: raise SIGSTOP on ourselves; returns once continued (SIGCONT).
+                unsafe { libc::raise(libc::SIGSTOP) };
+                // On resume, only take the terminal back over if we're the foreground process
+                // group again (Ctrl-Z then `fg`). If resumed in the background (Ctrl-Z then
+                // `bg`), suppress the footer so we don't take over the terminal (bug1/#1 seam).
+                suppressed = !term::is_foreground(libc::STDOUT_FILENO);
+                resized.store(true, Ordering::Relaxed); // requery size + redraw if not suppressed
+                continue;
+            }
             // Refresh the terminal size on a SIGWINCH event or the low-frequency fallback,
             // rather than an ioctl every tick.
             if term::should_requery_size(resized.swap(false, Ordering::Relaxed), last_size_query.elapsed(), SIZE_FALLBACK) {
@@ -199,12 +222,12 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
             }
             match rx.recv_timeout(render_tick) {
                 Ok(bytes) => {
-                    let footer = footer_now(&slow, &progress, size, style);
+                    let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
                     progress_shown |= footer.is_some();
                     let _ = guard.write_log(&bytes, footer.as_deref());
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let footer = footer_now(&slow, &progress, size, style);
+                    let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
                     progress_shown |= footer.is_some();
                     let _ = match footer {
                         Some(text) => guard.draw(&text),

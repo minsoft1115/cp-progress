@@ -52,7 +52,7 @@ pub fn detect() -> Capabilities {
         ci: std::env::var_os("CI").is_some(),
         linux_proc: proc_available(),
         stdbuf: stdbuf_available(),
-        foreground: foreground(libc::STDOUT_FILENO),
+        foreground: is_foreground(libc::STDOUT_FILENO),
     }
 }
 
@@ -61,7 +61,10 @@ pub fn detect() -> Capabilities {
 /// terminal; there we can't prove we're backgrounded, so we're lenient (return `true`). A real
 /// backgrounded `cprog &` has the tty as its controlling terminal and `tcgetpgrp` returns a
 /// *different* (foreground) pgrp, so it is correctly detected as background.
-fn foreground(fd: c_int) -> bool {
+///
+/// Checked at startup and re-checked when resuming from a `SIGTSTP` suspend (a `Ctrl-Z` then
+/// `bg` can move us to the background), so the footer is never drawn from a background job.
+pub fn is_foreground(fd: c_int) -> bool {
     let fg = unsafe { libc::tcgetpgrp(fd) };
     if fg < 0 {
         return true; // e.g. ENOTTY: not our controlling terminal -> can't tell -> allow
