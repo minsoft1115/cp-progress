@@ -51,7 +51,7 @@
 | A4 | **잡는 시그널의 범위** | `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` 4종만 등록. 그 외(`SIGUSR1` 등)는 기본 동작 | 🟡 `lib.rs::run_managed` |
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
 | A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않으며, passthrough는 exec라 시그널을 받는 것이 곧 `cp` 본체다(‑ 버전 한 줄 경로만 spawn+wait이고 거기서도 핸들러 없이 기본 동작) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
-| A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). spawn된 자식은 `std::process::Command`가 기본 disposition을 복원하고, **exec 경로는 exec 직전에 직접 `SIG_DFL`로 복원**한다 — ignore가 exec를 넘어가면 `cp -v … \| head`에서 순정과 달라지기 때문 | ✅ `tests/passthrough.rs::verbose_to_a_closed_pipe_dies_of_sigpipe_like_cp`, `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
+| A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). spawn된 자식은 `std::process::Command`가 기본 disposition을 복원하고, **exec 경로는 exec 직전에 직접 `SIG_DFL`로 복원**한다 — ignore가 exec를 넘어가면 `cp -v … \| head`에서 순정과 달라지기 때문. **exec가 실패하면 ignore를 되돌린다** — 안 그러면 cprog 자신의 `Fatal` stderr 쓰기가 broken pipe에서 SIGPIPE 사망이 되어 exit 127 계약을 깬다 | ✅ `tests/passthrough.rs::verbose_to_a_closed_pipe_dies_of_sigpipe_like_cp`, `tests/exit_contract.rs`(usage·failed-exec 모두 stderr가 broken pipe여도 exit code 유지) |
 | A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](./process-model.md#정리-cleanup) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
 
 ## Ctrl-Z / job control

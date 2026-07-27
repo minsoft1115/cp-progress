@@ -43,7 +43,8 @@
    (Rust 런타임의 ignore가 exec를 넘어가면 `cp -v … | head`에서 순정과 달라진다 — A7)
 2. cp로 exec — cprog는 소멸, 같은 PID가 cp가 된다
    (이후의 시그널·exit·job control은 cprog를 거치지 않고, `$!`도 진짜 cp의 PID다.
-    exec 실패(cp 없음 등)만 Fatal::CpSpawn → exit 127로 돌아온다)
+    exec 실패(cp 없음 등)만 Fatal::CpSpawn → exit 127로 돌아오며, 이때 SIGPIPE ignore를
+    되돌린다 — 계속 사는 cprog의 stderr 쓰기가 시그널 사망이 되지 않게. A7 참조)
 ```
 
 예외 — **버전 한 줄을 붙일 때만**(`--help`/`--version` + stderr TTY + `CPROG_PASSTHROUGH`

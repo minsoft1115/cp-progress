@@ -81,7 +81,16 @@ pub fn exec_replace(spec: &CommandSpec) -> io::Error {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
-    cmd.exec()
+    let err = cmd.exec();
+    // The exec failed and cprog lives on to report it. Put the Rust runtime's SIGPIPE-ignore
+    // back, or the best-effort Fatal write to a broken-pipe stderr would now kill the process
+    // with SIGPIPE instead of surfacing EPIPE — clobbering the exit-127 contract
+    // (tests/exit_contract.rs::failed_exec_with_broken_stderr_still_exits_127).
+    // SAFETY: as above.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+    }
+    err
 }
 
 /// Spawn the child described by `spec`. On success, `child.id()` is `cp`'s pid.
