@@ -26,7 +26,10 @@
 - **ui 레이아웃** — `(TerminalSize, ProgressState)`로 footer 문자열과 폭 축약 순서를 단언.
   in-memory writer(`Vec<u8>`)에 그려 escape 시퀀스를 바이트 단위로 검증.
 - **bar 양자화** — 바 폭이 `10/20/50/100` 중 들어가는 최대값으로 스냅되고(그 미만이면 바
-  생략), rate/eta 텍스트 폭이 바뀌어도 흔들리지 않음. (파일명은 footer에 안 넣으므로 이전의
+  생략), rate/eta 텍스트 폭이 바뀌어도 흔들리지 않음.
+- **파일명 줄** — 제어문자 제거 → 표시폭 기준 앞자름 → `…`/`...` 폴백. 폭 경계값, CJK(2칸),
+  개행이 든 경로, 이름이 폭보다 짧을 때(자르지 않음)까지 단언한다.
+- **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다. (파일명은 footer에 안 넣으므로 이전의
   name sanitize/truncate 항목은 폐기.)
 - **render/footer** — `FooterGuard`가 `Drop`에서 지움(정상 + `catch_unwind` panic);
   footer가 `height − min_log_rows`를 안 넘음.
@@ -131,8 +134,8 @@
 | C1 | 바 도중 리사이즈 | SIGWINCH → 재배치 | 유닛(flag) + 통합 |
 | C2 | SIGWINCH 유실/합쳐짐 | 폴백 주기로 재조회 | 유닛 |
 | C3 | 터미널이 footer보다 짧음(`height < min_log`) | footer 억제/최소, 로그 영역 보존 | 유닛(layout) |
-| C4 | ~~아주 긴 파일명~~ | **무효** — footer에 파일명을 안 넣는다(바로 윗 `-v` 줄이 표시) | — |
-| C5 | ~~파일명 제어문자/개행~~ | **무효** — 같은 이유(footer가 `/proc` 경로 텍스트에 노출 안 됨) | — |
+| C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여주므로 다시 유효(#20). 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
+| C5 | **파일명 제어문자/개행** | 같은 이유로 다시 유효(#20). **자르기 전에 제거** — 남기면 footer가 한 줄을 넘어 2행 지우기가 어긋남 | 유닛(개행·NUL·ESC 픽스처) |
 | C6 | 렌더/IO 실패 | exit code 안 바뀜(best-effort) | 유닛 + 통합 |
 | C7 | 렌더 중 panic | `FooterGuard::Drop`이 화면 정리 | 유닛(catch_unwind) |
 | C8 | 로그 바이트 도착 | footer 지운 뒤 로그 쓰고 다시 그림 | 유닛 |
