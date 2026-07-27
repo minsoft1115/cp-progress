@@ -30,8 +30,9 @@ pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
 /// model (see [`ProgressModel::percent`]) so overshoot/empty-source handling stays in one place.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressState {
-    /// Current file name (basename; captured for diagnostics, not shown in the footer — the
-    /// `cp -v` line above already names the file).
+    /// The destination path of the file being copied, shown on the footer's first row when the
+    /// user did not pass `-v` (docs/ui.md). The whole path, because that row is then the only
+    /// place naming the file and it is fitted by dropping its front.
     pub name: String,
     /// Source size in bytes; `None` when unknown -> indeterminate bar.
     pub total: Option<u64>,

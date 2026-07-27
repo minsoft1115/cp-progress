@@ -17,7 +17,7 @@
 
 ```
 1. cp spawn (-v 주입, stdout/stderr capture)   → PID 확보
-2. capture 리더 스레드 시작 → 로그 영역 중계 + 줄경계 펄스
+2. capture 리더 스레드 시작 → 줄경계 펄스(항상) + 로그 영역 중계(‑ stdout은 `-v`를 줬을 때만)
 3. slow-timer: 마지막 펄스 후 100ms 경과 & cp 생존 → 현재 파일 "느림"
 4. 느림이면 sampler 시작: /proc/fd → stat(dst)/stat(src) → ProgressState
 5. 렌더 루프(메인 스레드):
