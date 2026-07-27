@@ -249,8 +249,9 @@ pub enum Tick {
 }
 
 impl Tick {
-    /// The sample, if this tick produced one. Convenience for tests and call sites that only
-    /// care about fresh data.
+    /// The sample, if this tick produced one. Test-only: the render loop matches on all three
+    /// variants, because telling `Skip` from `Idle` is the whole point of the type.
+    #[cfg(test)]
     pub fn sample(self) -> Option<ProgressState> {
         match self {
             Tick::Sample(s) => Some(s),

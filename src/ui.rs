@@ -45,7 +45,9 @@ pub struct Style {
 }
 
 impl Style {
-    /// No colour, Unicode glyphs — the plain baseline used for layout tests.
+    /// No colour, Unicode glyphs — the plain baseline used for layout tests. Test-only:
+    /// production builds a [`Style`] from the environment via `term::detect_style`.
+    #[cfg(test)]
     pub fn plain() -> Self {
         Style { color: false, unicode: true }
     }

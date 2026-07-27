@@ -5,30 +5,38 @@
 //!   2. Preserve `cp`'s result *after* it runs — cprog-side failures are warnings only.
 //!
 //! Module layout mirrors docs/architecture.md. Implemented test-first (docs/testing.md).
+//!
+//! # Public surface
+//!
+//! [`run`] is the only public item, and deliberately so. This crate is a CLI tool: its contract
+//! is the command line — arguments handed to `cp` untouched, exit codes and signals preserved,
+//! passthrough output byte-identical — not any Rust API. The modules below are implementation
+//! detail and stay crate-internal, so reshaping them (which the design docs expect to keep
+//! happening) is not a breaking change for anyone.
 
 // Argument handling and run policy.
-pub mod args;
-pub mod plan;
+pub(crate) mod args;
+pub(crate) mod plan;
 
 // Capture, verbose line-boundary timing, slow-file detection.
-pub mod capture;
-pub mod verbose;
-pub mod slowfile;
+pub(crate) mod capture;
+pub(crate) mod verbose;
+pub(crate) mod slowfile;
 
 // Progress observation via /proc + stat.
-pub mod proc;
-pub mod sampler;
-pub mod progress;
+pub(crate) mod proc;
+pub(crate) mod sampler;
+pub(crate) mod progress;
 
 // Rendering.
-pub mod render;
-pub mod ui;
+pub(crate) mod render;
+pub(crate) mod ui;
 
 // Process lifecycle, terminal, messages, exit disposition.
-pub mod process;
-pub mod term;
-pub mod messages;
-pub mod exit;
+pub(crate) mod process;
+pub(crate) mod term;
+pub(crate) mod messages;
+pub(crate) mod exit;
 
 use std::ffi::OsString;
 use std::io::{self, Write};
