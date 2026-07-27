@@ -47,6 +47,9 @@ cprog -i big.iso backup.iso
 - `TERM=dumb` 또는 CI
 - 비-리눅스(‑ `/proc` 없음)
 - `stdbuf`가 없음(‑ `-v`를 실시간으로 못 흘려서 → passthrough)
+- 백그라운드 실행: `cprog a b &` (전경 프로세스 그룹이 아니면 터미널을 점거하지 않음).
+  Ctrl-Z 후 `bg`로 백그라운드 재개한 경우도 이후 footer를 그리지 않는다(‑ `fg`로 되돌려도
+  그 실행에서는 꺼진 채 유지; 다시 Ctrl-Z 후 `fg` 하면 복구).
 
 이 모든 경우 `cprog`는 `cp`와 바이트 동일.
 
