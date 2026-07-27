@@ -1,7 +1,7 @@
 //! Terminal writer, cursor/erase sequences, and `FooterGuard` (RAII screen restore)
 //! (docs/ui.md, docs/architecture.md).
 //!
-//! cprog is the terminal's sole writer, so it keeps the single-line footer and the scrolling
+//! cprog is the terminal's sole writer, so it keeps the footer rows and the scrolling
 //! log region from corrupting each other with an erase-redraw discipline: before any log
 //! bytes pass through, and before exit, the footer is erased; afterwards it is redrawn
 //! (docs/ui.md). [`FooterGuard`] owns the writer and, via `Drop`, guarantees the footer is
@@ -23,7 +23,7 @@ const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
 /// Move the cursor up one line (`CSI A`), used to erase a multi-row footer from the bottom up.
 const CURSOR_UP: &[u8] = b"\x1b[A";
 
-/// Owns the terminal writer and manages the single-line footer, erasing it on drop.
+/// Owns the terminal writer and manages the footer rows, erasing them on drop.
 pub struct FooterGuard<W: Write> {
     w: W,
     /// How many rows the footer currently occupies on screen; 0 when none is shown. The erase

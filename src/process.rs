@@ -25,8 +25,9 @@ pub struct CommandSpec {
 }
 
 impl CommandSpec {
-    /// Managed launch: `stdbuf -oL cp [-v] <cp args…>` with a stabilized, locale-neutral env
-    /// and captured stdout/stderr. `-v` is injected only when the user did not pass it.
+    /// Managed launch: `stdbuf -oL cp [-v] <cp args…>` with `QUOTING_STYLE` pinned (the
+    /// locale deliberately untouched) and captured stdout/stderr. `-v` is injected only when
+    /// the user did not pass it.
     pub fn managed(cp_args: &[OsString], verbose_present: bool) -> Self {
         let mut args = vec![OsString::from("-oL"), OsString::from("cp")];
         if !verbose_present {

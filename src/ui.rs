@@ -1,8 +1,10 @@
 //! Footer layout, bar rendering, and width-based field shedding (docs/ui.md).
 //!
-//! The footer is a single line composed left-to-right as `bar  percent  size  (rate)  eta`,
-//! e.g. `█████░░░░░  62.34 %  0.9/1.4 GiB  (1.8 GiB/s)  ⏳ 00:00`. The file name is **not**
-//! repeated here — cp's `-v` line, printed immediately above, already names the file. Percent
+//! The footer is two rows. Row one names the destination being copied — but only when the
+//! user did not pass `-v`; with `-v` the log line just above already says it, and the row
+//! stays blank as a separator (#20). Row two is the bar, composed left-to-right as
+//! `bar  percent  size  (rate)  eta`, e.g.
+//! `█████░░░░░  62.34 %  0.9/1.4 GiB  (1.8 GiB/s)  ⏳ 00:00`. Percent
 //! is two decimals, right-aligned to a fixed width so later fields never shift; size is the
 //! copied/total bytes in an adaptive unit; the rate is parenthesized as a qualifier. When the
 //! terminal is too narrow, fields are shed in priority order `eta -> rate -> size -> bar ->
