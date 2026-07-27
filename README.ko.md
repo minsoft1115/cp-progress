@@ -1,5 +1,10 @@
 # cprog
 
+[![crates.io](https://img.shields.io/crates/v/cp-progress.svg)](https://crates.io/crates/cp-progress)
+[![docs.rs](https://img.shields.io/docsrs/cp-progress)](https://docs.rs/cp-progress)
+[![license](https://img.shields.io/crates/l/cp-progress.svg)](./LICENSE)
+[![MSRV](https://img.shields.io/crates/msrv/cp-progress)](https://www.rust-lang.org)
+
 [English](README.md) | **한국어**
 
 `cprog`는 시스템 `cp`를 감싸는 얇은 래퍼다. **리눅스 대화형 터미널에서만** per-file 진행바를

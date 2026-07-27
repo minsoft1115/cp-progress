@@ -1,5 +1,10 @@
 # cprog
 
+[![crates.io](https://img.shields.io/crates/v/cp-progress.svg)](https://crates.io/crates/cp-progress)
+[![docs.rs](https://img.shields.io/docsrs/cp-progress)](https://docs.rs/cp-progress)
+[![license](https://img.shields.io/crates/l/cp-progress.svg)](./LICENSE)
+[![MSRV](https://img.shields.io/crates/msrv/cp-progress)](https://www.rust-lang.org)
+
 **English** | [한국어](README.ko.md)
 
 `cprog` is a thin wrapper around the system `cp`. It overlays a per-file progress bar **only in a
