@@ -104,17 +104,35 @@ impl<W: Write> FooterGuard<W> {
         self.draw(text)
     }
 
-    /// Relay log bytes through the sole writer: erase the footer, write the bytes, then redraw
-    /// the footer if one should remain (docs/testing.md C8).
+    /// Relay one run of log bytes; see [`Self::write_log_chunks`], which this defers to.
+    /// Test-only: the render loop always has a drained batch and calls the chunked form.
+    #[cfg(test)]
+    pub fn write_log(&mut self, bytes: &[u8], footer: Option<&str>) -> io::Result<()> {
+        self.write_log_chunks(std::iter::once(bytes), footer)
+    }
+
+    /// Relay several drained chunks through the sole writer: erase the footer, write each chunk in
+    /// turn, then redraw the footer if one should remain (docs/testing.md C8).
+    ///
+    /// The chunks are written separately rather than concatenated first. The writer buffers, so
+    /// joining them would only add a copy and a reallocation on a path that runs once per file
+    /// during a large recursive copy.
     ///
     /// If the bytes do not end on a line boundary the footer is withheld, because drawing it
     /// would overwrite the partial line and the next erase would take it off screen entirely
     /// (docs/ui.md invariant 10). It comes back with the write that completes the line.
-    pub fn write_log(&mut self, bytes: &[u8], footer: Option<&str>) -> io::Result<()> {
+    /// Taking an iterator rather than a slice keeps the caller from having to materialise one.
+    pub fn write_log_chunks<'a>(
+        &mut self,
+        chunks: impl IntoIterator<Item = &'a [u8]>,
+        footer: Option<&str>,
+    ) -> io::Result<()> {
         self.erase()?;
-        self.w.write_all(bytes)?;
-        if let Some(&last) = bytes.last() {
-            self.line_pending = last != b'\n';
+        for chunk in chunks {
+            self.w.write_all(chunk)?;
+            if let Some(&last) = chunk.last() {
+                self.line_pending = last != b'\n';
+            }
         }
         match footer {
             Some(text) if !self.line_pending => self.draw(text),
@@ -305,6 +323,50 @@ mod tests {
         let mark = buf.bytes().len();
         g.write_log(b"a -> b\n", Some("F")).unwrap();
         assert_eq!(&buf.bytes()[mark..], b"\r\x1b[Ka -> b\n\rF\x1b[K");
+    }
+
+    #[test]
+    fn drained_chunks_are_bracketed_by_one_erase_and_one_draw() {
+        // The render loop's actual path: several chunks drained from the queue go out in one
+        // pass. Relaying them one at a time would repeat erase -> write -> draw per chunk.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.draw("F").unwrap();
+        let mark = buf.bytes().len();
+        let chunks: [&[u8]; 3] = [b"one\n", b"two\n", b"three\n"];
+        g.write_log_chunks(chunks, Some("F")).unwrap();
+        assert_eq!(
+            &buf.bytes()[mark..],
+            b"\r\x1b[Kone\ntwo\nthree\n\rF\x1b[K",
+            "one erase, the chunks in order, one redraw"
+        );
+    }
+
+    #[test]
+    fn line_pending_follows_the_last_chunk_of_a_batch() {
+        // #4's rule applies to the batch as a whole: what matters is whether the *last* byte
+        // written ended a line, not whether some earlier chunk did.
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        let ends_open: [&[u8]; 2] = [b"done\n", b"cp: "];
+        g.write_log_chunks(ends_open, Some("F")).unwrap();
+        assert!(g.line_pending(), "batch ends mid-line -> footer withheld");
+        assert!(!buf.bytes().ends_with(b"F\x1b[K"), "no footer drawn over it");
+
+        let ends_closed: [&[u8]; 2] = [b"cannot stat 'x'", b": No such file\n"];
+        g.write_log_chunks(ends_closed, Some("F")).unwrap();
+        assert!(!g.line_pending(), "the newline in the last chunk completes it");
+        assert!(buf.bytes().ends_with(b"\rF\x1b[K"), "footer returns");
+    }
+
+    #[test]
+    fn an_empty_batch_still_clears_a_stale_footer() {
+        let buf = SharedBuf::default();
+        let mut g = FooterGuard::new(buf.clone());
+        g.draw("F").unwrap();
+        let mark = buf.bytes().len();
+        g.write_log_chunks(std::iter::empty(), None).unwrap();
+        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K", "footer erased, nothing written");
     }
 
     #[test]
