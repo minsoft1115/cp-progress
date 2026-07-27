@@ -1,4 +1,4 @@
-//! `stat().st_size` (with `st_blocks` fallback) polling -> `ProgressState`
+//! `stat().st_size` polling -> `ProgressState`
 //! (docs/progress-model.md).
 //!
 //! Each tick resolves the file `cp` is currently writing ([`crate::proc::select_current`]),
@@ -7,7 +7,7 @@
 //! so the tick logic is unit-tested from fixtures. A read failure keeps the last value
 //! ([`Tick::Skip`], docs/testing.md A9) while having nothing to measure takes the bar down
 //! ([`Tick::Idle`]); a `cp` that has moved on to a new file gets a fresh model with a fresh
-//! `total` and a freshly chosen [`Basis`].
+//! `total`.
 
 use std::collections::HashMap;
 use std::io;
@@ -22,72 +22,19 @@ use crate::progress::{ProgressModel, ProgressState};
 pub struct FileStat {
     /// `st_size` — the inode's logical length in bytes.
     pub size: u64,
-    /// `st_blocks` — allocated 512-byte blocks (real bytes on disk).
-    pub blocks: u64,
 }
 
 impl FileStat {
-    /// Bytes on disk (`st_blocks * 512`).
-    fn disk_bytes(&self) -> u64 {
-        self.blocks.saturating_mul(512)
-    }
-
-    /// Bytes copied so far, read on the given measurement basis.
-    pub fn bytes(&self, basis: Basis) -> u64 {
-        match basis {
-            Basis::Size => self.size,
-            Basis::Blocks => self.disk_bytes(),
-        }
-    }
-}
-
-/// Which `stat` field measures "bytes copied" for the current file (docs/progress-model.md
-/// "측정 기준(basis)은 파일마다 한 번만 정한다").
-///
-/// The two fields fail in opposite directions, so the choice is made once per file rather than
-/// reconciled every sample:
-///
-/// * a **preallocated** destination (`fallocate`) has its full `st_size` from the start, so only
-///   `st_blocks` tracks real writes;
-/// * a **sparse** destination — which `cp` produces by default (`--sparse=auto`) whenever the
-///   source has holes — legitimately has `st_blocks * 512` far below `st_size`, so measuring
-///   blocks would under-report and never reach 100%. The same holds on compressing filesystems.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Basis {
-    /// Measure `st_size` — the default.
-    Size,
-    /// Measure `st_blocks * 512` — only for a positively identified preallocated destination.
-    Blocks,
-}
-
-impl Basis {
-    /// Choose the basis from the first sample of a new destination.
+    /// Bytes copied so far.
     ///
-    /// `Size` is the default because `st_blocks` deviates from real progress in *both* directions
-    /// (low on sparse/compressed files, high under ext4's speculative preallocation), while
-    /// `st_size` states plainly how far the file has logically landed. `Blocks` is used only when
-    /// preallocation is positively identified: a non-sparse source, yet a destination that is
-    /// already at full length while almost nothing is on disk.
-    ///
-    /// Known limitation: under ext4's *delayed* allocation `st_blocks` trails `st_size` until
-    /// writeback, so a first sample taken when the destination is already at full length can read
-    /// as preallocation. The window is narrow — the bar only engages for slow files, whose first
-    /// sample lands mid-copy with `st_size` still below `total` — and GNU `cp` does not
-    /// preallocate at all, which makes `Blocks` a defensive path rather than a routine one
-    /// (docs/exceptions.md E22).
-    pub fn detect(first_dest: &FileStat, source: Option<&FileStat>, total: Option<u64>) -> Basis {
-        let (Some(src), Some(total)) = (source, total) else {
-            return Basis::Size;
-        };
-        // A source with holes explains a small-blocks destination on its own -> keep Size.
-        let source_is_sparse = src.disk_bytes() < src.size;
-        let dest_full_already = first_dest.size >= total;
-        let dest_blocks_lag = first_dest.disk_bytes() < total;
-        if total > 0 && !source_is_sparse && dest_full_already && dest_blocks_lag {
-            Basis::Blocks
-        } else {
-            Basis::Size
-        }
+    /// Always the logical size. `st_blocks * 512` is the alternative, and it is wrong more often
+    /// here: a sparse destination (which `cp` produces by default whenever the source has holes),
+    /// a compressing filesystem, and ext4's delayed allocation all leave the block count below
+    /// the length, which would pin the bar short of 100%. The one case where blocks would win —
+    /// a preallocated destination — is unreachable, because GNU `cp` never preallocates
+    /// (docs/progress-model.md "언제나 대상의 `st_size`로 잰다").
+    pub fn copied_bytes(&self) -> u64 {
+        self.size
     }
 }
 
@@ -105,7 +52,7 @@ impl StatSource for LinuxStatSource {
     fn stat(&self, path: &Path) -> io::Result<FileStat> {
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata(path)?; // follows symlinks: we want the target file
-        Ok(FileStat { size: m.size(), blocks: m.blocks() })
+        Ok(FileStat { size: m.size() })
     }
 }
 
@@ -113,8 +60,6 @@ impl StatSource for LinuxStatSource {
 struct CurrentModel {
     dest: PathBuf,
     name: String,
-    /// Fixed for this file once its first sample is taken (docs/progress-model.md).
-    basis: Basis,
     model: ProgressModel,
 }
 
@@ -168,8 +113,7 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
         })
     }
 
-    /// Discard the current file's timing history while keeping its identity, `total` and
-    /// [`Basis`].
+    /// Discard the current file's timing history while keeping its identity and `total`.
     ///
     /// Called after a job-control stop: `cp` was stopped alongside cprog, so the wall-clock span
     /// across the suspend carries no throughput information and would otherwise be smoothed in as
@@ -204,12 +148,6 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
             let source = source_for(dest_fd, &cur.sources)
                 .and_then(|src| self.stat.stat(&src).ok());
             let total = source.map(|st| st.size);
-            // The first destination sample also fixes the measurement basis for this file. If it
-            // cannot be read we skip the tick entirely rather than guess a basis we would be
-            // stuck with for the whole file (A9: skip, keep last).
-            let Ok(first_dest) = self.stat.stat(&dest) else {
-                return Tick::Skip;
-            };
             let name = dest
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -217,14 +155,13 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
             self.current = Some(CurrentModel {
                 dest: dest.clone(),
                 name,
-                basis: Basis::detect(&first_dest, source.as_ref(), total),
                 model: ProgressModel::new(total, self.window),
             });
         }
 
         let cm = self.current.as_mut().expect("current set above");
         let done = match self.stat.stat(&cm.dest) {
-            Ok(st) => st.bytes(cm.basis),
+            Ok(st) => st.copied_bytes(),
             Err(_) => return Tick::Skip, // A9: keep the model's last value
         };
         cm.model.push(now, done);
@@ -249,8 +186,9 @@ pub enum Tick {
 }
 
 impl Tick {
-    /// The sample, if this tick produced one. Convenience for tests and call sites that only
-    /// care about fresh data.
+    /// The sample, if this tick produced one. Test-only: the render loop matches on all three
+    /// variants, because telling `Skip` from `Idle` is the whole point of the type.
+    #[cfg(test)]
     pub fn sample(self) -> Option<ProgressState> {
         match self {
             Tick::Sample(s) => Some(s),
@@ -327,79 +265,49 @@ mod tests {
         v
     }
 
-    // ---- measurement basis, decided once per file (docs/progress-model.md) ------------
+    // ---- always the size basis (docs/progress-model.md) --------------------------------
 
     #[test]
-    fn bytes_reads_the_chosen_basis() {
-        let st = FileStat { size: 1_000_000, blocks: 200 }; // 200 blocks = 102_400 bytes
-        assert_eq!(st.bytes(Basis::Size), 1_000_000);
-        assert_eq!(st.bytes(Basis::Blocks), 102_400);
-    }
-
-    #[test]
-    fn preallocated_destination_picks_the_blocks_basis() {
-        // docs/testing.md A2: a normal source, but the destination's size is already full on the
-        // first sample while almost nothing is on disk -> fallocate -> measure real blocks.
-        let src = FileStat { size: 1000, blocks: 2 }; // not sparse
-        let first_dst = FileStat { size: 1000, blocks: 1 }; // full size, 512 bytes on disk
-        assert_eq!(Basis::detect(&first_dst, Some(&src), Some(1000)), Basis::Blocks);
-    }
-
-    #[test]
-    fn sparse_source_keeps_the_size_basis() {
-        // #3: `cp --sparse=auto` (the default) makes the destination sparse when the source has
-        // holes. blocks*512 << size is then CORRECT, so measuring blocks would under-report.
-        let src = FileStat { size: 209_715_200, blocks: 2056 }; // 200 MiB, mostly hole
-        let first_dst = FileStat { size: 209_715_200, blocks: 8 }; // dest already seeked to full
-        assert_eq!(
-            Basis::detect(&first_dst, Some(&src), Some(209_715_200)),
-            Basis::Size,
-            "a sparse source must not be mistaken for a preallocated destination"
-        );
-    }
-
-    #[test]
-    fn ordinary_copy_keeps_the_size_basis() {
-        let src = FileStat { size: 1000, blocks: 2 };
-        let first_dst = FileStat { size: 300, blocks: 1 }; // still growing
-        assert_eq!(Basis::detect(&first_dst, Some(&src), Some(1000)), Basis::Size);
-    }
-
-    #[test]
-    fn unknown_total_or_source_keeps_the_size_basis() {
-        let dst = FileStat { size: 300, blocks: 1 };
-        assert_eq!(Basis::detect(&dst, None, None), Basis::Size);
-        assert_eq!(Basis::detect(&dst, Some(&FileStat { size: 1000, blocks: 2 }), None), Basis::Size);
-    }
-
-    #[test]
-    fn compressed_filesystem_keeps_the_size_basis() {
-        // btrfs `compress` / ZFS: blocks*512 < size is normal for the destination too, but the
-        // size grows gradually, so this is never mistaken for preallocation.
-        let src = FileStat { size: 1_000_000, blocks: 1954 };
-        let first_dst = FileStat { size: 50_000, blocks: 40 }; // compressed, still growing
-        assert_eq!(Basis::detect(&first_dst, Some(&src), Some(1_000_000)), Basis::Size);
+    fn copied_bytes_are_the_logical_size() {
+        // No basis decision exists any more: `done` is the destination's st_size, full stop.
+        assert_eq!(FileStat { size: 1_000_000 }.copied_bytes(), 1_000_000);
+        assert_eq!(FileStat { size: 0 }.copied_bytes(), 0);
     }
 
     #[test]
     fn sparse_destination_progress_reaches_completion() {
-        // #3 end to end: a 200 MiB mostly-hole file must read 100 % when the copy finishes,
-        // not the ~0.5 % the old min(size, blocks*512) clamp produced.
+        // #3: a 200 MiB mostly-hole file must read 100 % when the copy finishes. `cp` produces a
+        // sparse destination by default (--sparse=auto) whenever the source has holes, so this is
+        // the ordinary case, not an exotic one.
         const TOTAL: u64 = 209_715_200;
         let proc = FakeProc::new(file("/dst/holey", Some("/src/holey")));
         let stat = FakeStat::default();
-        stat.set("/src/holey", Ok(FileStat { size: TOTAL, blocks: 2056 }));
+        stat.set("/src/holey", Ok(FileStat { size: TOTAL }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
 
-        stat.set("/dst/holey", Ok(FileStat { size: TOTAL / 2, blocks: 1028 }));
+        stat.set("/dst/holey", Ok(FileStat { size: TOTAL / 2 }));
         let mid = s.tick(t0).sample().unwrap();
         assert_eq!(crate::progress::percent_of(mid.done, mid.total), Some(50.0));
 
-        stat.set("/dst/holey", Ok(FileStat { size: TOTAL, blocks: 2056 }));
+        stat.set("/dst/holey", Ok(FileStat { size: TOTAL }));
         let end = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
         assert_eq!(end.done, TOTAL);
         assert_eq!(crate::progress::percent_of(end.done, end.total), Some(100.0));
+    }
+
+    #[test]
+    fn a_destination_smaller_on_disk_than_its_length_still_completes() {
+        // The shape shared by sparse files, compressing filesystems and ext4 delayed allocation:
+        // what is on disk lags the logical length. Measuring blocks would pin the bar below 100 %
+        // in all three; measuring size is right in all three (#12).
+        let proc = FakeProc::new(file("/dst/a", Some("/src/a")));
+        let stat = FakeStat::default();
+        stat.set("/src/a", Ok(FileStat { size: 1_000 }));
+        stat.set("/dst/a", Ok(FileStat { size: 1_000 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let st = s.tick(Instant::now()).sample().unwrap();
+        assert_eq!(crate::progress::percent_of(st.done, st.total), Some(100.0));
     }
 
     // ---- basic progress ---------------------------------------------------------------
@@ -408,76 +316,53 @@ mod tests {
     fn progress_rises_to_complete() {
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 200, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
         let a = s.tick(t0).sample().unwrap();
         assert_eq!(a.name, "a.iso");
         assert_eq!(a.total, Some(1000));
         assert_eq!(a.done, 200);
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 1000 }));
         let b = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
         assert_eq!(b.done, 1000);
         assert_eq!(crate::progress::percent_of(b.done, b.total), Some(100.0));
     }
 
     #[test]
-    fn preallocated_destination_does_not_report_fake_full() {
-        // docs/testing.md A2: dest size is already full (preallocated) but only 512 bytes
-        // are on disk -> report 512, not 100%.
+    fn a_preallocated_destination_reads_complete_immediately() {
+        // Documented limitation, asserted so it stays deliberate (#12, docs/progress-model.md).
+        // A tool that preallocates its destination gives it the full st_size up front, so the bar
+        // jumps straight to 100%. GNU `cp` has no preallocation path, which is why measuring
+        // st_size unconditionally is the right trade: the cases that argue for counting blocks
+        // (sparse, compressed, delayed allocation) are routine, this one is unreachable.
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 1000, blocks: 1 })); // full size, 512 on disk
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 1000 })); // preallocated: full length, no data
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let st = s.tick(Instant::now()).sample().unwrap();
-        assert_eq!(st.done, 512);
-        assert!(crate::progress::percent_of(st.done, st.total).unwrap() < 100.0);
+        assert_eq!(crate::progress::percent_of(st.done, st.total), Some(100.0));
     }
-
-    #[test]
-    fn basis_is_fixed_for_the_file_and_re_detected_on_the_next_one() {
-        // The basis is decided once per destination: a preallocated file keeps the blocks basis
-        // even as its blocks fill in, and the next (sparse) file starts the decision over.
-        let proc = FakeProc::new(file("/dst/pre", Some("/src/pre")));
-        let stat = FakeStat::default();
-        stat.set("/src/pre", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/pre", Ok(FileStat { size: 1000, blocks: 1 })); // preallocated
-        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
-        let t0 = Instant::now();
-        assert_eq!(s.tick(t0).sample().unwrap().done, 512, "blocks basis chosen");
-
-        stat.set("/dst/pre", Ok(FileStat { size: 1000, blocks: 2 }));
-        assert_eq!(s.tick(t0 + Duration::from_millis(100)).sample().unwrap().done, 1024, "still blocks");
-
-        // cp moves on to a sparse file -> the basis is decided again, and must be size.
-        proc.set(file("/dst/sp", Some("/src/sp")));
-        stat.set("/src/sp", Ok(FileStat { size: 100_000, blocks: 8 })); // sparse source
-        stat.set("/dst/sp", Ok(FileStat { size: 60_000, blocks: 4 }));
-        let st = s.tick(t0 + Duration::from_secs(2)).sample().unwrap();
-        assert_eq!(st.done, 60_000, "size basis for the sparse file");
-    }
-
-    // ---- A9: skip on error, keep last -------------------------------------------------
 
     #[test]
     fn dest_stat_error_skips_tick_and_keeps_model() {
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 500, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 500 }));
         assert_eq!(s.tick(t0).sample().unwrap().done, 500);
 
         stat.set("/dst/a.iso", Err(())); // transient stat failure
         assert_eq!(s.tick(t0 + Duration::from_millis(500)), Tick::Skip, "skip, no crash");
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 700, blocks: 2 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 700 }));
         let c = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
         assert_eq!(c.done, 700, "continues from the same model");
         assert_eq!(c.total, Some(1000), "total not reset");
@@ -499,9 +384,9 @@ mod tests {
     fn growing_candidate_wins_over_an_inherited_write_fd() {
         let proc = FakeProc::new(decoy_and_dest());
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40, blocks: 1 })); // never grows
-        stat.set("/dst/a.iso", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 })); // never grows
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
 
@@ -509,7 +394,7 @@ mod tests {
         assert_eq!(s.tick(t0), Tick::Skip, "no growth history yet -> no guess");
 
         // The destination grows; the decoy does not.
-        stat.set("/dst/a.iso", Ok(FileStat { size: 400, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.name, "a.iso", "the growing file is the destination");
         assert_eq!(st.done, 400);
@@ -521,8 +406,8 @@ mod tests {
         // The common case must not pay the extra tick: one candidate is the destination at once.
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         assert_eq!(s.tick(Instant::now()).sample().unwrap().done, 100);
     }
@@ -533,13 +418,13 @@ mod tests {
         // decoy — copies stall briefly all the time.
         let proc = FakeProc::new(decoy_and_dest());
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40, blocks: 1 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
         assert_eq!(s.tick(t0), Tick::Skip);
-        stat.set("/dst/a.iso", Ok(FileStat { size: 400, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
         assert_eq!(s.tick(t0 + Duration::from_millis(100)).sample().unwrap().name, "a.iso");
 
         // Nothing changes this tick: stay on a.iso.
@@ -555,15 +440,15 @@ mod tests {
         // so the rule stays "the growing file", not "the file we happened to pick first".
         let proc = FakeProc::new(decoy_and_dest());
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40, blocks: 1 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
         assert_eq!(s.tick(t0), Tick::Skip);
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 110, blocks: 1 })); // +10
-        stat.set("/tmp/decoy.log", Ok(FileStat { size: 9000, blocks: 18 })); // +8960
+        stat.set("/dst/a.iso", Ok(FileStat { size: 110 })); // +10
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 9000 })); // +8960
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.name, "decoy.log", "the biggest gainer is what is being written");
     }
@@ -579,9 +464,9 @@ mod tests {
             write_fd(5, "/dst/big.iso"),
         ]);
         let stat = FakeStat::default();
-        stat.set("/etc/passwd", Ok(FileStat { size: 2_000, blocks: 4 }));
-        stat.set("/src/big.iso", Ok(FileStat { size: 1_000_000, blocks: 1954 }));
-        stat.set("/dst/big.iso", Ok(FileStat { size: 250_000, blocks: 489 }));
+        stat.set("/etc/passwd", Ok(FileStat { size: 2_000 }));
+        stat.set("/src/big.iso", Ok(FileStat { size: 1_000_000 }));
+        stat.set("/dst/big.iso", Ok(FileStat { size: 250_000 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
 
         let st = s.tick(Instant::now()).sample().unwrap();
@@ -599,15 +484,15 @@ mod tests {
             write_fd(6, "/dst/a.iso"),
         ]);
         let stat = FakeStat::default();
-        stat.set("/tmp/decoy.log", Ok(FileStat { size: 10, blocks: 1 })); // never grows
-        stat.set("/etc/passwd", Ok(FileStat { size: 2_000, blocks: 4 }));
-        stat.set("/src/a.iso", Ok(FileStat { size: 800, blocks: 2 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 10 })); // never grows
+        stat.set("/etc/passwd", Ok(FileStat { size: 2_000 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 800 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
         assert_eq!(s.tick(t0), Tick::Skip, "two write candidates, no growth history yet");
 
-        stat.set("/dst/a.iso", Ok(FileStat { size: 400, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.name, "a.iso", "destination by growth (#6)");
         assert_eq!(st.total, Some(800), "source by fd pairing (#11)");
@@ -621,8 +506,8 @@ mod tests {
         // a frozen bar on screen until the next `-v` pulse — or until cp exits, for the last file.
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/src/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/a.iso", Ok(FileStat { size: 1000, blocks: 2 }));
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 1000 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
         assert!(matches!(s.tick(t0), Tick::Sample(_)), "sampling while the file is open");
@@ -638,11 +523,11 @@ mod tests {
     #[test]
     fn idle_then_a_new_file_starts_a_fresh_model() {
         // After Idle the sampler holds no per-file state, so the next file is established from
-        // scratch (fresh total and basis) rather than continuing the finished one.
+        // scratch (a fresh total) rather than continuing the finished one.
         let proc = FakeProc::new(file("/dst/a", Some("/src/a")));
         let stat = FakeStat::default();
-        stat.set("/src/a", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/a", Ok(FileStat { size: 400, blocks: 1 }));
+        stat.set("/src/a", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/a", Ok(FileStat { size: 400 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let t0 = Instant::now();
         assert_eq!(s.tick(t0).sample().unwrap().total, Some(1000));
@@ -651,8 +536,8 @@ mod tests {
         assert_eq!(s.tick(t0 + Duration::from_millis(50)), Tick::Idle);
 
         proc.set(file("/dst/b", Some("/src/b")));
-        stat.set("/src/b", Ok(FileStat { size: 77, blocks: 1 }));
-        stat.set("/dst/b", Ok(FileStat { size: 10, blocks: 1 }));
+        stat.set("/src/b", Ok(FileStat { size: 77 }));
+        stat.set("/dst/b", Ok(FileStat { size: 10 }));
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.total, Some(77));
         assert_eq!(st.done, 10);
@@ -662,7 +547,7 @@ mod tests {
     fn proc_error_skips_tick() {
         let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
         let stat = FakeStat::default();
-        stat.set("/dst/a.iso", Ok(FileStat { size: 1, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 1 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         proc.fail.set(true);
         assert_eq!(s.tick(Instant::now()), Tick::Skip);
@@ -683,7 +568,7 @@ mod tests {
         // docs/testing.md A10 downstream: source not a regular file -> total unknown.
         let proc = FakeProc::new(file("/dst/a.iso", None));
         let stat = FakeStat::default();
-        stat.set("/dst/a.iso", Ok(FileStat { size: 300, blocks: 1 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 300 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let st = s.tick(Instant::now()).sample().unwrap();
         assert_eq!(st.total, None);
@@ -691,60 +576,58 @@ mod tests {
     }
 
     #[test]
-    fn linux_stat_source_reads_real_size_and_blocks() {
+    fn linux_stat_source_reads_the_real_size() {
         let path = std::env::temp_dir().join(format!("cprog_stat_{}", std::process::id()));
         std::fs::write(&path, vec![0u8; 4096]).unwrap();
         let st = LinuxStatSource.stat(&path).unwrap();
-        // Logical size is exact; a non-empty file has some blocks allocated. We avoid asserting
-        // blocks*512 >= size, which can fail on transparently-compressed/inline filesystems.
-        assert_eq!(st.size, 4096);
-        assert!(st.blocks > 0, "a non-empty file has allocated blocks");
-        // The default (size) basis reports the logical length verbatim.
-        assert_eq!(st.bytes(Basis::Size), 4096);
         std::fs::remove_file(&path).ok();
+        assert_eq!(st.size, 4096);
+        assert_eq!(st.copied_bytes(), 4096);
     }
 
     #[test]
-    fn real_sparse_file_is_measured_on_the_size_basis() {
-        // #3 against the kernel rather than fixtures: a real file with a hole reports
-        // blocks*512 far below st_size, and that must not be read as preallocation.
+    fn a_real_sparse_file_reports_its_full_logical_size() {
+        // #3/#12 against the kernel rather than fixtures. A file with a hole has far fewer blocks
+        // than its length — the very shape that made the old block-based measurement stall short
+        // of 100%. Reading st_size gives the logical progress the bar is meant to show.
         use std::io::{Seek, SeekFrom, Write};
+        use std::os::unix::fs::MetadataExt;
+        const LEN: u64 = 64 * 1024 * 1024;
         let path = std::env::temp_dir().join(format!("cprog_sparse_{}", std::process::id()));
         let mut f = std::fs::File::create(&path).unwrap();
-        f.seek(SeekFrom::Start(64 * 1024 * 1024)).unwrap(); // leave a 64 MiB hole
+        f.seek(SeekFrom::Start(LEN)).unwrap(); // leave a 64 MiB hole
         f.write_all(b"END").unwrap();
         f.sync_all().unwrap();
         drop(f);
 
+        let blocks = std::fs::metadata(&path).unwrap().blocks();
         let st = LinuxStatSource.stat(&path).unwrap();
         std::fs::remove_file(&path).ok();
-        // Filesystems that do not support holes (or compress inline) would allocate the whole
-        // range; there is nothing to assert there.
-        if st.blocks.saturating_mul(512) >= st.size {
-            return;
+
+        assert_eq!(st.copied_bytes(), LEN + 3, "the full logical length, holes included");
+        // Filesystems without hole support would allocate the whole range; nothing to compare.
+        if blocks.saturating_mul(512) < st.size {
+            assert!(
+                blocks.saturating_mul(512) < st.copied_bytes(),
+                "on-disk blocks trail the length here — measuring them would stall the bar"
+            );
         }
-        assert_eq!(
-            Basis::detect(&st, Some(&st), Some(st.size)),
-            Basis::Size,
-            "a sparse source/destination must keep the size basis, not be read as preallocated"
-        );
-        assert_eq!(st.bytes(Basis::Size), st.size, "size basis reports full logical progress");
     }
 
     #[test]
     fn new_file_resets_total() {
         let proc = FakeProc::new(file("/dst/a", Some("/src/a")));
         let stat = FakeStat::default();
-        stat.set("/src/a", Ok(FileStat { size: 1000, blocks: 2 }));
-        stat.set("/dst/a", Ok(FileStat { size: 300, blocks: 1 }));
+        stat.set("/src/a", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/a", Ok(FileStat { size: 300 }));
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
         let a = s.tick(Instant::now()).sample().unwrap();
         assert_eq!(a.total, Some(1000));
 
         // cp moves on to the next file.
         proc.set(file("/dst/b", Some("/src/b")));
-        stat.set("/src/b", Ok(FileStat { size: 2000, blocks: 4 }));
-        stat.set("/dst/b", Ok(FileStat { size: 100, blocks: 1 }));
+        stat.set("/src/b", Ok(FileStat { size: 2000 }));
+        stat.set("/dst/b", Ok(FileStat { size: 100 }));
         let b = s.tick(Instant::now() + Duration::from_secs(2)).sample().unwrap();
         assert_eq!(b.name, "b");
         assert_eq!(b.total, Some(2000));

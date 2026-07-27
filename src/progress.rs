@@ -91,6 +91,10 @@ impl ProgressModel {
 
     /// Current-file percentage in `0..=100`, or `None` when the total is unknown
     /// (indeterminate). Empty source (total 0) reads as complete; overshoot clamps to 100.
+    ///
+    /// Test-only: the renderer calls [`percent_of`] on a snapshot rather than reaching into the
+    /// model, so the rule lives in exactly one place.
+    #[cfg(test)]
     pub fn percent(&self) -> Option<f64> {
         percent_of(self.done(), self.total)
     }

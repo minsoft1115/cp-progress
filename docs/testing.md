@@ -56,8 +56,10 @@
 - **passthrough env 순수성:** managed가 쓰는 `QUOTING_STYLE=shell-escape`이 passthrough엔 안
   걸려, `cp`의 stdout·**에러 메시지(로케일 포함)** 까지 바이트 동일. (managed는 `LC_ALL=C`를
   걸지 않는다 — cprog는 `-v`를 파싱하지 않아 로케일 고정이 불필요하고, 비-ASCII 파일명을 보존한다.)
-- fault injection(‑ `test-hooks` cargo feature, **기본 off**라 릴리스 바이너리엔 없음):
-  "sampler/relay가 중간에 실패" 정리 경로. **(계획 — 아직 미구현)**
+- fault injection: "sampler/relay가 중간에 실패" 정리 경로. 한때 `test-hooks` cargo feature
+  슬롯을 두었으나, 그 사이 유닛 테스트가 같은 경로를 덮어(`dest_stat_error_skips_tick_and_keeps_model`,
+  `proc_error_skips_tick`, `io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs`)
+  쓰이지 않는 feature만 남아 **제거했다.**
 
 > **핵심:** fake cp는 flush를 제어하므로 실전 버퍼링을 못 잡는다. 최소 하나의 통합 테스트는
 > **진짜 `cp`** 로 스트리밍을 확인해야 한다.
@@ -79,8 +81,8 @@
   스위트의 순수성을 지킨다.
 - 동작을 최대한 순수 유닛으로 **끌어내려** 통합 테스트를 적고 안정적으로.
 - **`cp` 결과 보존**을 테스트로 못박음: relay/footer IO 실패가 exit code를 바꾸지 않음.
-- **(계획, 미구현)** `test-hooks` feature 기반 fault-injection과, 릴리스 바이너리에 hook 문자열
-  부재를 `strings`로 단언하는 테스트. feature 슬롯(`Cargo.toml`)만 있고 seam·테스트는 아직 없다.
+- fault-injection 전용 feature는 두지 않는다. 주입 seam 없이도 실패 경로를 유닛에서 덮을 수 있고,
+  쓰이지 않는 feature는 게시된 크레이트에서 "켤 수 있지만 아무 일도 없는" 스위치로 노출되기 때문이다.
 
 ---
 
@@ -94,9 +96,9 @@
 | # | 예외 | 기대 동작 | 방식 |
 |---|---|---|---|
 | A1 | `copy_file_range`로 `fdinfo:pos`가 0 | `pos`가 아니라 `st_size`를 읽음(설계 고정) | 유닛(sampler가 size 소스 사용) |
-| A2 | `fallocate`로 `st_size`가 즉시 full | `st_blocks*512`로 폴백(실제 쓰기 반영) | 유닛(‑ size=full, blocks<full 픽스처) |
+| A2 | `fallocate`로 `st_size`가 즉시 full | **한계로 수용** — 바가 즉시 100%. `cp`엔 선할당 경로가 없어 도달 불가(#12) | 유닛(한계를 명시하는 테스트) |
 | A3 | reflink/CoW로 즉시 완료 | 첫 샘플 전 `done==total` → 바 100% 또는 skip | 유닛 |
-| A4 | sparse 파일(‑ `st_size` > 실제) | %는 유의미, `st_blocks` 폴백, rate 과대 허용 | 유닛 + 문서 한계 |
+| A4 | sparse 파일(‑ `st_size` > 실제) | size로 재므로 %는 정확, rate만 과대 허용 | 유닛 + 문서 한계 |
 | A5 | 총량 0(빈 원본) | `0/0` div-by-zero 금지 → 100% 또는 indeterminate | 유닛 |
 | A6 | `done > total`(오버슈트) | %를 100으로 clamp | 유닛 |
 | A7 | 두 샘플 간 증가 0/음수 | `rate≈0`, `eta=--:--` | 유닛 |

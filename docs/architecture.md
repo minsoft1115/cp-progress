@@ -33,7 +33,7 @@ main
 | `verbose.rs` | 캡처 스트림의 **줄 경계** 감지 = "새 항목" 펄스 (내용 파싱 안 함) |
 | `slowfile.rs` | 펄스 + `Clock` → "현재 파일이 느린가" 판정 |
 | `proc.rs` | `/proc/<pid>/fd` readlink로 현재 대상/원본 경로 |
-| `sampler.rs` | `stat().st_size`(+`st_blocks` 폴백) 폴링 → `ProgressState`(rate/eta 평활화) |
+| `sampler.rs` | `stat().st_size` 폴링 → `ProgressState`(rate/eta 평활화) |
 | `progress.rs` | `ProgressState` 모델(현재 파일 done/total/rate/eta) |
 | `ui.rs` | footer 레이아웃 + 바 렌더 + 폭 축약 |
 | `render.rs` | 터미널 writer, 커서/erase 시퀀스, `FooterGuard`(RAII 화면복구) |

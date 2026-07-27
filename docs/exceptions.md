@@ -16,11 +16,13 @@
 | 📄 | **의도적 비대응** — 설계상 한계로 받아들이고 문서화한 것 |
 | 🔶 | **미커버 갭** — 이 문서를 쓰며 새로 식별 |
 
-> **2026-07 갱신:** 아래 🔶로 식별한 항목은 이슈 #3–#11로 등록해 **전부 처리됐다.** 각 행의
-> 상태는 ✅ **해결(#N)** 으로 갱신했고, 무엇을 어떻게 고쳤는지는 문서 끝
-> [해결 기록](#해결-기록-r1r7)에 남겼다. 유일하게 남은 🔶는 **E22**로, 고칠 결함이라기보다
-> "이 분기를 계속 둘 것인가"라는 설계 판단이라 [#12](https://github.com/minsoft1115/cp-progress/issues/12)에서
-> 선택지와 함께 다룬다.
+> **2026-07 갱신:** 아래 🔶로 식별한 항목은 이슈 **#3–#13**으로 등록해 **전부 처리됐다.**
+> 각 행의 "현재 동작" 열은 **고친 뒤의 동작**을 적고, 원래 문제는 *이전에는* 절로 남겼다.
+> 무엇을 어떻게 고쳤는지는 문서 끝 [해결 기록](#해결-기록-r1r7)에 정리했다.
+>
+> 마지막까지 남았던 **E22**는 고칠 결함이라기보다 "이 분기를 계속 둘 것인가"라는 설계 판단이라
+> [#12](https://github.com/minsoft1115/cp-progress/issues/12)에서 선택지와 함께 다뤘고,
+> **분기 제거**로 결론지었다.
 
 🔶 항목에는 **검증 수준**을 함께 적는다:
 
@@ -50,7 +52,7 @@
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
 | A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않음 → cprog와 cp 모두 기본 동작(전경 그룹 전체가 함께 죽음) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
 | A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). 자식은 `std::process::Command`가 기본 disposition을 복원해 `cp`가 정상적으로 SIGPIPE에 반응 | 🟡 `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
-| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cprog가 cp에 시그널을 보내도 처리되지 않음 → 파이프가 안 닫혀 reader join이 **무한 대기**. `process-model.md`의 "join은 유계" 서술이 이 경우 성립하지 않음 | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
+| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](#a8-note) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
 
 ## Ctrl-Z / job control
 
@@ -62,7 +64,7 @@
 | A10 | **Ctrl-Z 후 `bg`** (백그라운드 재개) | 재개 시점에 `tcgetpgrp != getpgrp`이면 `suppressed = true` → 이후 footer를 그리지 않음. **단방향**: 다시 `fg`로 돌아와도 그 실행에서는 꺼진 채 유지(다시 Ctrl-Z→`fg` 하면 복구) | ✅ `lib.rs::run_managed`, `tests/suspend.rs::ctrl_z_then_bg_does_not_redraw_footer_in_background` |
 | A11 | **teardown(join/wait) 중 Ctrl-Z** | 렌더 루프가 끝나면 `SIGTSTP`를 `SIG_DFL`로 되돌림. 안 그러면 플래그 핸들러만 남아 정지도 진행도 못 하는 wedge가 됨 | ✅ `lib.rs::restore_default_suspend`, 유닛 `teardown_signal_disposition` |
 | A12 | **Ctrl-Z 동안 `cp`도 함께 정지** | Ctrl-Z는 전경 프로세스 그룹 전체에 전달되므로 `cp`도 정지 → 복사가 실제로 멈춤. 재개하면 이어서 진행(cp의 정상 동작) | 📄 |
-| A13 | **정지→재개 직후 rate/eta가 잠시 비정상** | 정지 동안 샘플은 안 쌓이지만 `Instant`는 흐름 → rolling window가 "긴 시간 동안 진행 0"을 품어 재개 후 **약 1초(window 길이) 동안 rate가 0에 가깝고 eta는 `--:--`** 로 나옴. cp도 함께 정지했으므로 대부분 정확한 표현이며 자동 회복된다. 정지 직전 몇 바이트가 더 안착한 경우에만 rate가 아주 작은 양수가 되어 **eta가 터무니없이 크게** 표시될 수 있음 | ✅ **해결(#9)** — 재개 시 rate 히스토리를 비운다. `progress::reset_samples` + `sampler::reset_rate_history` |
+| A13 | **정지→재개 직후 rate/eta가 잠시 비정상** | 재개 시 진행 모델의 rate 히스토리를 **비운다** → 정지 구간이 평균에 섞이지 않고 재개 후 실제 처리량만으로 다시 계산된다. *이전에는* window가 벽시계 기준이라 "긴 시간 동안 진행 0"을 품어, 재개 후 약 1초간 rate가 0에 가깝고 eta가 `--:--`로 나왔다 | ✅ **해결(#9)** — 재개 시 rate 히스토리를 비운다. `progress::reset_samples` + `sampler::reset_rate_history` |
 | A14 | **passthrough에서 Ctrl-Z** | 핸들러 없음 → 기본 동작으로 그룹 정지. footer가 없으므로 복구할 것도 없음 | ✅ 설계상 |
 
 ---
@@ -119,9 +121,9 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | D6 | **stdout/stderr 인터리브 순서** | 파이프 둘을 각각 중계하므로 상대 순서가 순정 `cp`와 미세하게 다를 수 있음 | 📄 `capture-and-verbose.md` |
 | D7 | **relay 쓰기 실패**(EPIPE 등) | 무음 best-effort. exit code에 영향 없음 | ✅ `render.rs::io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs` |
 | D8 | **reader가 read 에러** | 루프 종료(EOF와 동일 취급) → 채널 닫힘 → 메인 루프도 정리 단계로 | 🟡 `capture::relay_stdout`/`relay_bytes` |
-| D9 | **대량 소파일로 `-v` 폭주** | 채널이 **unbounded** `mpsc::channel`이라, 파이프에서 읽는 속도가 터미널 쓰기 속도를 넘으면 큐가 계속 자란다. 파이프가 주던 자연스러운 백프레셔가 사라지고 로그가 메모리에 쌓이는 구조 | ✅ **해결(#8)** — 경계 있는 `sync_channel` + tick당 배치 드레인. `capture.rs::a_full_queue_makes_the_relay_wait_rather_than_buffer` |
-| D10 | <a id="d10"></a>**footer가 떠 있는 동안 도착한 여러 조각짜리 메시지가 화면에서 유실** | `cp`의 에러 한 줄은 glibc `error()` 때문에 **write 4회**로 나뉘어 온다(`"cp: "` / `"cannot …"` / `": 이유"` / `"\n"`). 각 조각이 별도 청크로 relay되고 그때마다 footer가 `\r`로 그 줄을 덮은 뒤 다음 erase가 줄을 통째로 지운다 → **개행을 품은 마지막 조각만 화면에 남는다.** 실측: 복사 도중 쓰기 에러 시 화면에 `: File too large`만 남고 `cp: error writing '<경로>'`가 사라짐 | ✅ **해결(#4)** — 부분 줄이 화면에 있으면 footer를 보류. `render::line_pending`, `tests/log_integrity.rs` |
-| D11 | **느린 파일이 끝난 뒤 footer가 잠시 낡은 값을 보여줌** | 샘플러는 `is_slow`가 참인 동안 tick이 `None`을 반환하면(대상 fd가 닫힘) 진행 상태를 **직전 값 그대로 유지**한다(`None`으로 되돌리는 건 `is_slow`가 거짓일 때뿐). 다음 `-v` 펄스가 오거나 cp가 끝날 때까지 정지된 바가 남는다. D10이 재현되는 전제이기도 하다 | ✅ **해결(#7)** — `Tick::Idle`과 `Tick::Skip`을 구분해 끝난 파일은 바를 내린다. `sampler.rs::finished_file_reports_idle_not_skip` |
+| D9 | **대량 소파일로 `-v` 폭주** | 채널이 **경계 있는 `sync_channel`** 이라 큐가 차면 리더가 대기하고 → 파이프가 차고 → `cp`가 잠시 기다린다(백프레셔 복원). 렌더 루프는 tick마다 큐를 드레인해 한 번에 쓴다. *이전에는* unbounded 큐라 터미널이 느리면 못 그린 로그가 메모리에 계속 쌓였다 | ✅ **해결(#8)** — 경계 있는 `sync_channel` + tick당 배치 드레인. `capture.rs::a_full_queue_makes_the_relay_wait_rather_than_buffer` |
+| D10 | <a id="d10"></a>**footer가 떠 있는 동안 도착한 여러 조각짜리 메시지가 화면에서 유실** | 터미널에 **개행으로 끝나지 않은 줄이 남아 있는 동안 footer를 보류**하고, 다음 개행에서 다시 그린다 → 여러 조각으로 오는 `cp` 에러가 온전히 남는다. *이전에는* 조각마다 footer가 `\r`로 그 줄을 덮고 다음 erase가 지워, `cp: error writing '<경로>'`가 사라지고 마지막 조각만 남았다(glibc `error()`는 한 줄을 write 4회로 낸다) | ✅ **해결(#4)** — 부분 줄이 화면에 있으면 footer를 보류. `render::line_pending`, `tests/log_integrity.rs` |
+| D11 | **느린 파일이 끝난 뒤 footer가 잠시 낡은 값을 보여줌** | tick 결과를 `Sample`/`Skip`/`Idle` 셋으로 구분해, **잴 게 없으면(`Idle`) 바를 내리고** 읽기가 실패했을 때만(`Skip`) 마지막 값을 유지한다. *이전에는* 둘 다 `None`이라 끝난 파일의 마지막 값이 계속 발행돼 정지된 바가 남았다 | ✅ **해결(#7)** — `Tick::Idle`과 `Tick::Skip`을 구분해 끝난 파일은 바를 내린다. `sampler.rs::finished_file_reports_idle_not_skip` |
 
 ---
 
@@ -130,9 +132,9 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
 | E1 | **`copy_file_range`로 `fdinfo:pos`가 0** | 애초에 `pos`를 안 읽는다. 대상의 `st_size`를 읽으므로 coreutils 9.x에서도 정확 | ✅ 설계 고정, `progress-model.md` |
-| E2 | **`fallocate` 선할당으로 `st_size`가 즉시 full** | `effective_bytes = min(st_size, st_blocks*512)`로 실제 쓰기를 따라감 → 가짜 100% 없음 | ✅ `sampler::FileStat::effective_bytes`, `preallocated_destination_does_not_report_fake_full` |
+| E2 | **`fallocate` 선할당으로 `st_size`가 즉시 full** | 바가 즉시 100%가 된다 — **의도적으로 수용한 한계**다. GNU `cp`엔 선할당 경로가 없어 도달할 수 없고, 이를 막으려 blocks로 재면 sparse·압축·지연할당이라는 **흔한** 경우가 모두 틀어진다(#12) | 📄 `sampler.rs::a_preallocated_destination_reads_complete_immediately` |
 | E3 | **reflink / CoW로 즉시 완료** | 첫 샘플 전에 끝나거나 100%로 점프. 정확하지만 점진적이지 않음 | 📄 |
-| E4 | **sparse 파일 / hole이 있는 원본** | ⚠️ **`progress-model.md`의 "비율은 유의미하다"는 서술은 사실과 다르다.** `done`은 `min(size, blocks*512)`로 눌리는데 `total`은 원본의 `st_size` 그대로라, hole이 많을수록 비율이 크게 **과소** 표시되고 100%에 도달하지 못한다 | ✅ **해결(#3)** — 측정 기준을 파일마다 한 번 고정. `sampler::Basis` |
+| E4 | **sparse 파일 / hole이 있는 원본** | `done`·`total` 둘 다 `st_size`라 hole이 많아도 **비율이 정확**하고 100%에 도달한다. 실제로 쓰인 바이트가 아니라 논리적 진행을 세므로 hole 구간에서 rate만 높게 보인다. *이전에는* `done`이 `min(size, blocks*512)`로 눌려 비율이 크게 과소 표시됐다 | ✅ **해결(#3, #12)** — 언제나 `st_size`로 측정. `sampler::FileStat::copied_bytes` |
 | E5 | **빈 원본(total = 0)** | `percent_of`가 `Some(100.0)` — 0 나누기 없음 | ✅ `progress.rs::percent_empty_source_is_complete_not_divide_by_zero` |
 | E6 | **`done > total` 오버슈트** | 100으로 clamp | ✅ `progress.rs::percent_overshoot_clamps_to_100` |
 | E7 | **두 샘플 간 증가가 0이거나 음수** | rate는 정확히 `0.0`(음수 delta는 saturating으로 0), eta는 `None`(`--:--`) | ✅ `progress.rs::rate_zero_when_no_increase`/`rate_zero_when_negative_increase` |
@@ -142,12 +144,12 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E11 | **stdin/stdout이 정규 파일로 리다이렉트** | `fd > 2`만 후보로 삼아 stdio를 복사 대상으로 오인하지 않음 | ✅ `proc.rs::redirected_low_fds_are_not_selected` |
 | E12 | **rate/eta가 아직 미지** | 샘플 2개 미만이면 `None` → `(-- MiB/s)` / `⏳ --:--`. 엉뚱한 숫자를 지어내지 않음 | ✅ `progress.rs::rate_unknown_before_two_samples` |
 | E13 | **cp가 다음 파일로 넘어감** | 대상 경로가 바뀌면 새 모델 + 새 `total`로 리셋 | ✅ `sampler.rs::new_file_resets_total` |
-| E14 | **`cp`의 기본 `--sparse=auto`가 만든 대상** | E4와 같은 뿌리이며 **가장 흔한 발현 경로**다. cp는 기본적으로 원본의 hole을 감지해 대상을 sparse로 만든다 → 대상의 `blocks*512`가 `st_size`보다 훨씬 작아져 `done`이 눌린다. 실측: 200 MiB(대부분 hole) 복사 시 `done`이 1 MiB에서 멈춰 **완료 시점에도 0.5%**. VM 이미지·DB 파일·코어덤프 등 hole이 흔한 대용량 파일이 정확히 이 부류다 | ✅ **해결(#3)** — 측정 기준을 파일마다 한 번 고정. `sampler::Basis` |
-| E15 | **압축/inline 파일시스템**(btrfs `compress`, ZFS) 또는 `st_blocks`를 0으로 보고하는 FS | 같은 메커니즘. `blocks*512 < size`가 정상인 곳에서는 진행이 과소 표시되고, `st_blocks`가 0이면 바가 0%에 고정된다 | ✅ **해결(#3)** — 같은 수정(기본이 size 기준이라 영향 없음) |
-| E16 | **`total`과 `done`의 측정 기준 비대칭** | `total`은 원본의 **`st_size`**, `done`은 대상의 **`min(size, blocks*512)`**. 기준이 다르므로 E4/E14/E15의 오차는 상쇄되지 않고 그대로 비율에 남는다 | ✅ **해결(#3)** — 두 값 모두 파일별 기준 하나로 잰다 |
-| E17 | **상속된 fd가 대상으로 오인됨** | 셸이 열어준 fd(`cprog a b 3>/tmp/log`)는 CLOEXEC가 아니라 `cp`까지 상속된다. `select_current`는 `fd > 2`인 **첫 `RegularWrite`** 를 고르는데, 셸 리다이렉션의 fd는 번호가 낮아 cp가 나중에 여는 진짜 대상보다 **먼저 선택된다.** 실측: `exec 3>decoy.log` 상태에서 cp의 fd는 `3=decoy(쓰기) 4=원본 5=대상`이 되고 규칙은 fd 3을 고름 → 엉뚱한 파일의 진행을 표시 | ✅ **해결(#6)** — 후보가 여럿이면 자라는 fd를 고른다. `sampler::choose_dest` |
-| E21 | **상속된 *읽기* fd가 원본으로 오인됨** | #6의 대칭 문제. `cprog a b 3<other`처럼 셸이 물려준 읽기 fd는 번호가 낮아 진짜 원본보다 먼저 선택되고, `total`이 엉뚱한 파일 크기가 되어 비율이 무의미해진다(작은 파일이면 즉시 100%). 원본은 크기가 변하지 않아 #6의 "자라는 쪽" 규칙을 쓸 수 없다 → **fd 번호로 짝짓는다**: `cp`는 원본을 열고 곧바로 대상을 열므로, 고른 대상 fd보다 작은 읽기 fd 중 **가장 큰 것**이 원본이다. 대상보다 위쪽 번호의 무관한 읽기 fd도 함께 배제된다 | ✅ **해결(#11)** — `proc::source_for`. `exec 3<tiny` 상태에서 96 MiB 원본을 정확히 인식 |
-| E22 | **`Basis::Blocks` 오검출(ext4 delayed allocation)** | 선할당 판정은 "원본이 sparse가 아닌데 대상 size가 이미 full이고 blocks가 한참 뒤처짐"이다. ext4의 지연 할당에서는 writeback 전까지 `st_blocks`가 `st_size`를 못 따라오므로, **첫 샘플이 이미 size==total인 순간에 잡히면** 선할당으로 오인해 blocks 기준을 고를 수 있고, 그러면 바가 0% 근처에 머문다. 바는 느린 파일에만 켜지고 첫 샘플은 보통 복사 도중(size<total)에 잡히므로 창은 좁다. 참고로 **GNU `cp`는 선할당을 하지 않으므로** blocks 기준은 사실상 방어적 경로다 — 즉 `cp`로는 닿을 수 없는 상황을 막자고 둔 분기가, 정작 리눅스 기본 파일시스템에서 오작동할 수 있다 | 🔶 **[코드]** 알려진 한계, [#12](https://github.com/minsoft1115/cp-progress/issues/12)로 등록 |
+| E14 | **`cp`의 기본 `--sparse=auto`가 만든 대상** | sparse 대상에서도 `st_size`로 재므로 정상 동작한다. 실측: hole 48MiB를 낀 144MiB 복사에서 **96.6%** 까지 상승(구 구현 상한은 66.7%). *이전에는* `cp`의 기본 `--sparse=auto`가 만든 대상의 `blocks*512`가 작아 `done`이 눌렸고, 200MiB(대부분 hole) 복사가 완료 시점에도 0.5%로 보였다 | ✅ **해결(#3, #12)** — 언제나 `st_size`로 측정. `sampler::FileStat::copied_bytes` |
+| E15 | **압축/inline 파일시스템**(btrfs `compress`, ZFS) 또는 `st_blocks`를 0으로 보고하는 FS | `st_blocks`를 아예 보지 않으므로 영향받지 않는다. *이전에는* `blocks*512 < size`가 정상인 이 파일시스템들에서 진행이 과소 표시되고, `st_blocks`가 0이면 바가 0%에 고정됐다 | ✅ **해결(#3, #12)** — size만 보므로 영향 없음 |
+| E16 | **`total`과 `done`의 측정 기준 비대칭** | `total`(원본)과 `done`(대상) 모두 **`st_size`** 로 재므로 기준이 같다. *이전에는* `done`만 `min(size, blocks*512)`라 기준이 어긋나 오차가 그대로 비율에 남았다 | ✅ **해결(#3, #12)** — 양쪽 모두 `st_size`라 비대칭이 사라짐 |
+| E17 | **상속된 fd가 대상으로 오인됨** | 쓰기 후보가 여럿이면 **틱 사이에 크기가 자라는 fd**를 고른다 → 셸이 물려준 fd(`3>/tmp/log`)는 자라지 않으므로 배제된다. *이전에는* `fd > 2`인 첫 `RegularWrite`를 골라, 번호가 낮은 상속 fd가 진짜 대상보다 먼저 선택됐다 | ✅ **해결(#6)** — 후보가 여럿이면 자라는 fd를 고른다. `sampler::choose_dest` |
+| E21 | **상속된 *읽기* fd가 원본으로 오인됨** | 원본을 **고른 대상 fd보다 작은 읽기 fd 중 가장 큰 것**으로 짝짓는다(`cp`는 원본을 열고 곧바로 대상을 연다) → 상속된 읽기 fd와 대상 이후에 열린 fd가 함께 배제된다. *이전에는* 가장 낮은 읽기 fd를 원본으로 삼아 `total`이 엉뚱한 파일 크기가 됐다 | ✅ **해결(#11)** — `proc::source_for`. `exec 3<tiny` 상태에서 96 MiB 원본을 정확히 인식 |
+| E22 | **`Basis::Blocks` 오검출(ext4 delayed allocation)** | 판정 분기가 **없다** — 언제나 `st_size`로 잰다. *이전에는* 선할당 판정 조건이 ext4 지연 할당과 같은 모양이라, 첫 샘플이 그 순간에 걸리면 blocks 기준으로 고정돼 바가 0% 근처에 머물 수 있었다. `cp`가 하지 않는 동작을 막자고 리눅스 기본 파일시스템에서 틀릴 위험을 안고 있던 셈 | ✅ **해결(#12)** — `Basis` 제거, 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
 | E19 | **아주 빠른 파일** | 첫 샘플 전에 끝남 → 바 없이 지나감(의도된 동작) | 📄 |
 | E20 | **샘플링 비용** | 느린 파일일 때만 `readlink` 1회 + `stat` 1~2회/100ms. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
@@ -353,13 +355,14 @@ select_current 가 고르는 것 = fd 3 (decoy.log)   ← 진짜 대상 아님
 
 | 권고 | 이슈 | 처리 | 확인 |
 |---|---|---|---|
-| [R1](#r1) | #3 | 측정 기준을 파일마다 한 번 고정(`sampler::Basis`) | hole 48MiB를 낀 144MiB 복사에서 구 상한 66.7%를 넘어 **92.6%** 관측 |
+| [R1](#r1) | #3 | 측정 기준을 파일마다 한 번 고정(`sampler::Basis`) — 이후 **#12에서 분기째 제거**되어 항상 `st_size` | hole 48MiB를 낀 144MiB 복사에서 구 상한 66.7%를 넘어 **92.6%** 관측 |
 | [R2](#r2) | #4 | 부분 줄이 화면에 있으면 footer 보류(`render::line_pending`) | 복사 도중 쓰기 에러에서 `cp: error writing '<경로>': …` **전문이 화면에 남음** |
 | [R3](#r3) | #5 | 시그널 전달 시 `SIGCONT` 동반 | 정지된 cp + SIGTERM에서 10초+ hang → **0.11초 signaled 종료** |
 | [R6](#r6) | #6 | 후보가 여럿이면 자라는 fd 선택(`sampler::choose_dest`) | `exec 3>decoy.log` 상태에서도 **진짜 대상**의 진행을 표시 |
 | [R4](#r4) | #8 | 경계 `sync_channel` + tick당 배치 드레인 | 큐가 차면 relay가 대기함을 유닛 테스트로 고정 |
 | [R5](#r5) | #9 | 재개 시 rate 히스토리 폐기 | 정지 구간이 평균에 섞이지 않음(유닛) |
 | [R7](#r7) | #10 | 회피 불가 → `usage.md`에 `tput cnorm` 안내 | — |
+| E22 | #12 | `Basis` 분기 제거, 항상 `st_size` | `sampler.rs` 순감 117줄(112 추가/229 삭제), sparse·압축·지연할당 전부 정상 |
 | E21 | #11 | 원본을 대상 fd 기준으로 짝짓기(`proc::source_for`) | `exec 3<tiny.txt` 상태에서도 `total`을 **96.0 MiB**(진짜 원본)로 인식 |
 
 D11(끝난 파일의 낡은 바)은 #7로 함께 처리했다 — `Tick::Idle`과 `Tick::Skip`을 구분해,

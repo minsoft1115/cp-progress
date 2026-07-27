@@ -46,6 +46,10 @@ impl<W: Write> FooterGuard<W> {
     /// glibc's `error()` emits one error line as four separate writes, and the relay forwards
     /// each fragment as it arrives (it must not wait for a newline). This is tracked on the
     /// bytes actually written to the terminal, because stdout and stderr merge on one screen.
+    ///
+    /// Test-only as an accessor: production code goes through [`Self::write_log`] and
+    /// [`Self::draw_unless_line_pending`], which consult the flag themselves.
+    #[cfg(test)]
     pub fn line_pending(&self) -> bool {
         self.line_pending
     }

@@ -71,11 +71,10 @@ appears in a Linux interactive terminal with `stdbuf`; for raw bar accuracy, `ad
   timing; its **contents are never parsed**.
 - Progress is measured from the **destination file's size**, not `fdinfo: pos` — because with
   coreutils 9.x's `copy_file_range`, `pos` stays 0 for the whole copy.
-- Which size, though, is decided **once per file**: `st_size` by default, `st_blocks * 512` only
-  when a preallocated destination is positively identified. The two fail in opposite directions —
-  a preallocated file has its full `st_size` from the start, while a **sparse** destination (which
-  `cp` produces by default via `--sparse=auto` whenever the source has holes) legitimately has far
-  fewer blocks than its length. See [`docs/progress-model.md`](./docs/progress-model.md).
+- Always its `st_size`, never the block count. A **sparse** destination — which `cp` produces by
+  default via `--sparse=auto` whenever the source has holes — has far fewer blocks than its
+  length, as do compressing filesystems and ext4 mid-writeback; counting blocks would leave the
+  bar short of 100% in all three. See [`docs/progress-model.md`](./docs/progress-model.md).
 
 ## Status
 
