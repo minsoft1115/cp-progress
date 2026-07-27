@@ -103,7 +103,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | C3 | **`wait()` 실패** (예: `ECHILD`) | `Fatal::CpWait { pid, source }` → exit 1 | ✅ `messages.rs::cp_wait_fatal` |
 | C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님) | 🟡 `process::spawn` |
 | C5 | **C4에서 부분 복사된 대상 파일** | `cp`는 SIGTERM에 정리를 하지 않으므로 **잘린 대상 파일이 남는다.** 이는 `cp`를 직접 죽였을 때와 동일한 결과 — 의미론 보존 | 📄 |
-| C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`, `tests/managed.rs`(D7) |
+| C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`; `tests/managed.rs`가 간접 증명(D7 — footer가 떴다는 것 자체가 spawn된 pid로 `cp`의 fd를 읽었다는 뜻) |
 | C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임) | 🟡 |
 | C8 | **자식은 하나뿐** | 외부 progress 도구도 hidden PTY도 없으므로 누수될 helper 프로세스 자체가 없다 | 📄 |
 
@@ -152,7 +152,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E22 | **`Basis::Blocks` 오검출(ext4 delayed allocation)** | 판정 분기가 **없다** — 언제나 `st_size`로 잰다. *이전에는* 선할당 판정 조건이 ext4 지연 할당과 같은 모양이라, 첫 샘플이 그 순간에 걸리면 blocks 기준으로 고정돼 바가 0% 근처에 머물 수 있었다. `cp`가 하지 않는 동작을 막자고 리눅스 기본 파일시스템에서 틀릴 위험을 안고 있던 셈 | ✅ **해결(#12)** — `Basis` 제거, 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
 | E19 | **아주 빠른 파일** | 첫 샘플 전에 끝남 → 바 없이 지나감(의도된 동작) | 📄 |
-| E20 | **샘플링 비용** | 느린 파일일 때만 `readlink` 1회 + `stat` 1~2회/100ms. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
+| E20 | **샘플링 비용** | 느린 파일일 때만, tick(기본 100ms)마다 `/proc/<pid>/fd` 열거(항목마다 readlink + 종류·모드 조회) + `stat` 1~2회. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
 
 ---
 
@@ -197,7 +197,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
 | H1 | **`CPROG_*_MS`가 숫자가 아님** | 에러 없이 **조용히 기본값**으로 폴백 | 🟡 `lib::env_ms` |
-| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 모든 파일이 즉시 "느림" → 거의 항상 footer가 뜸(테스트에서 이 성질을 이용) | 🟡 |
+| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 모든 파일이 즉시 "느림" → 거의 항상 footer가 뜸(‑ 통합 테스트는 같은 성질을 임계 1ms로 이용) | 🟡 |
 | H3 | **managed의 env 변경 범위** | `QUOTING_STYLE=shell-escape` **하나뿐**. `LC_ALL=C`는 일부러 안 건다 — `-v`를 파싱하지 않으니 이득이 없고, C 로케일은 한글 등 비-ASCII 파일명을 옥타 이스케이프로 깨뜨린다 | ✅ `process.rs::managed_sets_only_quoting_style_not_locale` |
 | H4 | **passthrough의 env** | **전혀 건드리지 않음** → cp의 에러 메시지 로케일까지 바이트 동일 | ✅ `process.rs::passthrough_never_touches_env` |
 | H5 | **Mutex poisoning**(스레드 패닉) | `lock_shared`가 `into_inner()`로 복구. 공유 값(슬로우 타이머·최근 샘플)엔 깨질 불변식이 없고, 여기서 죽으면 `cp`를 wait 못 해 exit code 계약이 깨지므로 | ✅ `lib::lock_shared` |

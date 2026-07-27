@@ -69,4 +69,6 @@ signal-hook = "0.3"   # 선택(권장): SIGWINCH 플래그
 [dev-dependencies]
 # PTY 테스트 하네스: openpty/waitpid(term,process) + killpg(signal) + mkfifo(fs).
 nix = { version = "0.30", features = ["term", "process", "signal", "fs"] }
+# 통합 테스트 전용: PTY 리사이즈(TIOCSWINSZ — nix에 래퍼가 없다) 등 저수준 호출.
+libc = "0.2"
 ```
