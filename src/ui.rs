@@ -55,18 +55,16 @@ impl Style {
 
 /// The per-tick render decision: the footer to draw right now, or `None` to show nothing.
 ///
-/// A footer appears only while the current file is slow *and* a progress sample exists, and
-/// only when the terminal can spare the row (docs/ui.md). This is the pure core the managed
-/// render loop calls each tick, composing slow-file timing, the latest sample, and the size.
+/// `state` is what the sampler published, and it is the single source of truth: the sampler
+/// alone decides whether the current file is slow, publishing `Some` when there is something to
+/// draw and `None` otherwise. Re-deriving that here would mean two places agreeing on the same
+/// question — and would cost the render path a clock read and a mutex on every wake-up, which is
+/// where the overhead on many-small-file copies came from (docs/architecture.md "동시성").
 pub fn footer_for(
-    is_slow: bool,
     state: Option<&ProgressState>,
     size: TerminalSize,
     style: Style,
 ) -> Option<String> {
-    if !is_slow {
-        return None;
-    }
     render_footer(size, state?, style)
 }
 
@@ -572,22 +570,22 @@ mod tests {
 
     #[test]
     fn footer_for_hidden_when_not_slow() {
-        assert_eq!(footer_for(false, Some(&state()), TerminalSize::new(80, 24), Style::plain()), None);
+        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain()), None);
     }
 
     #[test]
     fn footer_for_hidden_when_slow_but_no_state_yet() {
-        assert_eq!(footer_for(true, None, TerminalSize::new(80, 24), Style::plain()), None);
+        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain()), None);
     }
 
     #[test]
     fn footer_for_shown_when_slow_with_state() {
-        let line = footer_for(true, Some(&state()), TerminalSize::new(80, 24), Style::plain());
+        let line = footer_for(Some(&state()), TerminalSize::new(80, 24), Style::plain());
         assert!(line.is_some_and(|l| l.contains('%')));
     }
 
     #[test]
     fn footer_for_respects_size_suppression() {
-        assert_eq!(footer_for(true, Some(&state()), TerminalSize::new(80, 2), Style::plain()), None);
+        assert_eq!(footer_for(Some(&state()), TerminalSize::new(80, 2), Style::plain()), None);
     }
 }

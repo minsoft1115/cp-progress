@@ -39,9 +39,9 @@ pub(crate) mod messages;
 pub(crate) mod exit;
 
 use std::ffi::OsString;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufWriter, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -227,10 +227,27 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     // suppressed so a background job never takes over the terminal (bug1/#1 seam).
     let mut suppressed = false;
     {
-        let mut guard = FooterGuard::new(io::stdout().lock());
+        // Buffered on purpose: `StdoutLock` is line-buffered, so relaying several drained chunks
+        // would flush once per chunk. Every write path here ends in an explicit `flush`, so
+        // buffering changes nothing about when output appears (#18).
+        let mut guard = FooterGuard::new(BufWriter::new(io::stdout().lock()));
         let mut size = TerminalSize::new(80, 24);
+        // Reused across iterations: `clear` keeps the outer allocation, so draining the queue
+        // costs nothing extra on the path that runs once per file (#18).
+        let mut batch: Vec<Vec<u8>> = Vec::new();
         let mut last_size_query = Instant::now();
         const SIZE_FALLBACK: Duration = Duration::from_secs(1);
+        // The terminal size is only ever used to lay out a footer, so it is refreshed only when
+        // one is about to be drawn — on a SIGWINCH event or the low-frequency fallback. With
+        // nothing to draw this skips an ioctl *and* a clock read per wake-up, which is the whole
+        // of the per-file cost on a copy of many small files (#18). Leaving the SIGWINCH flag set
+        // when we skip is deliberate: the first draw that needs it consumes it.
+        fn refresh_size(resized: &AtomicBool, size: &mut TerminalSize, last: &mut Instant) {
+            if term::should_requery_size(resized.swap(false, Ordering::Relaxed), last.elapsed(), SIZE_FALLBACK) {
+                *size = term::terminal_size(libc::STDOUT_FILENO).unwrap_or(*size);
+                *last = Instant::now();
+            }
+        }
         loop {
             // A caught terminating signal ends the render loop so cleanup can run.
             if received_signal.load(Ordering::Relaxed) != 0 {
@@ -252,27 +269,43 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 resized.store(true, Ordering::Relaxed); // requery size + redraw if not suppressed
                 continue;
             }
-            // Refresh the terminal size on a SIGWINCH event or the low-frequency fallback,
-            // rather than an ioctl every tick.
-            if term::should_requery_size(resized.swap(false, Ordering::Relaxed), last_size_query.elapsed(), SIZE_FALLBACK) {
-                size = term::terminal_size(libc::STDOUT_FILENO).unwrap_or(size);
-                last_size_query = Instant::now();
-            }
-            match rx.recv_timeout(render_tick) {
+            // Try first without a deadline: when a copy is producing `-v` lines steadily the
+            // queue is never empty, and `recv_timeout` would compute a deadline — several clock
+            // reads — on every single one of them. Only an empty queue needs the timed wait, and
+            // that is exactly when there is time to spare (#18).
+            let received = match rx.try_recv() {
+                Ok(bytes) => Ok(bytes),
+                Err(TryRecvError::Disconnected) => Err(RecvTimeoutError::Disconnected),
+                Err(TryRecvError::Empty) => rx.recv_timeout(render_tick),
+            };
+            match received {
                 Ok(bytes) => {
-                    // Drain whatever else is already queued and write it in one go: relaying each
-                    // chunk separately would repeat the erase -> write -> draw round trip per read
-                    // and let the queue outrun the terminal on a large recursive copy.
-                    let mut batch = bytes;
+                    // Drain whatever else is already queued and write it in one pass: relaying
+                    // each chunk separately would repeat the erase -> write -> draw round trip per
+                    // read and let the queue outrun the terminal on a large recursive copy. The
+                    // chunks stay separate — the writer buffers, so joining them would only cost
+                    // a copy (#18).
+                    batch.clear();
+                    batch.push(bytes);
                     while let Ok(more) = rx.try_recv() {
-                        batch.extend_from_slice(&more);
+                        batch.push(more);
                     }
-                    let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
+                    let footer = if suppressed || lock_shared(&progress).is_none() {
+                        None
+                    } else {
+                        refresh_size(&resized, &mut size, &mut last_size_query);
+                        footer_now(&progress, size, style)
+                    };
                     progress_shown |= footer.is_some();
-                    let _ = guard.write_log(&batch, footer.as_deref());
+                    let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice), footer.as_deref());
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let footer = if suppressed { None } else { footer_now(&slow, &progress, size, style) };
+                    let footer = if suppressed || lock_shared(&progress).is_none() {
+                        None
+                    } else {
+                        refresh_size(&resized, &mut size, &mut last_size_query);
+                        footer_now(&progress, size, style)
+                    };
                     progress_shown |= footer.is_some();
                     let _ = match footer {
                         // Withheld while an unterminated log line is on screen, so the periodic
@@ -331,18 +364,17 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     Ok(disp)
 }
 
-/// The footer to draw right now for the given (cached) terminal size: slow-file state +
-/// latest sample.
+/// The footer to draw right now for the given (cached) terminal size.
+///
+/// Only the sampler's published snapshot is consulted — it alone decides whether the current file
+/// is slow. Deciding again here would cost a clock read and a second mutex on every wake-up, on
+/// the path that runs once per file during a large recursive copy (#18).
 fn footer_now(
-    slow: &Mutex<SlowTimer>,
     progress: &Mutex<Option<ProgressState>>,
     size: TerminalSize,
     style: Style,
 ) -> Option<String> {
-    let now = Instant::now();
-    let is_slow = lock_shared(slow).is_slow(now);
-    let state = lock_shared(progress);
-    footer_for(is_slow, state.as_ref(), size, style)
+    footer_for(lock_shared(progress).as_ref(), size, style)
 }
 
 /// Lock shared render state, tolerating a poisoned mutex. The shared values — the slow-file
