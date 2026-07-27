@@ -68,11 +68,20 @@ RunMode = ManagedTui | Passthrough
 `cp`의 출력만 보여서 **사용자가 cprog의 버전을 알 방법이 없다** — `cprog --version`조차
 `cp (GNU coreutils) 9.x`만 낸다.
 
-그래서 informational 인자일 때만, `cp`가 끝난 뒤 **한 줄**을 덧붙인다:
+그래서 informational 인자일 때만, `cp`가 끝난 뒤 **빈 줄 하나와 한 줄**을 덧붙인다:
 
 ```
-cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
+Written by Torbjörn Granlund, David MacKenzie, and Jim Meyering.
+                                                            ← 빈 줄
+cprog 0.3.0 — https://github.com/minsoft1115/cp-progress    ← dim
 ```
+
+빈 줄과 dim은 이 줄이 **`cp` 출력의 일부가 아님**을 알리기 위한 것이다. 둘 다 없으면 cp의 마지막
+문단에 붙어 읽힌다. **가로줄은 쓰지 않는다** — 터미널 폭을 알아야 하는데 이 경로는 크기를 조회하지
+않고, cprog는 다른 어디에서도 장식을 그리지 않는다.
+
+dim은 요약이 쓰는 것과 **같은 `Style.color`** 를 따르므로 `NO_COLOR`·`TERM=dumb`에서 자동으로
+꺼진다(‑ 그때는 평문 한 줄).
 
 조건은 요약 규칙과 동일하다:
 

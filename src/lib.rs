@@ -48,7 +48,7 @@ use std::time::{Duration, Instant};
 
 use args::ArgError;
 use exit::{disposition, finalize, ExitDisposition};
-use messages::{summary, version_line, Fatal};
+use messages::{summary, version_notice, Fatal};
 use plan::RunMode;
 use signal_hook::consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGTSTP, SIGWINCH};
 use proc::LinuxProcSource;
@@ -104,8 +104,9 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
     // `--help`/`--version` reach `cp` untouched, which leaves nothing naming cprog itself. Say so
     // afterwards — on stderr, and only on a terminal, so redirected output stays byte-identical
     // (#15, docs/runtime-model.md "버전 표시"). Best-effort like every other write of ours.
-    if let Some(line) = version_line(informational, io::stderr().is_terminal()) {
-        let _ = writeln!(io::stderr(), "{line}");
+    let notice = version_notice(informational, io::stderr().is_terminal(), term::detect_style().color);
+    if let Some(text) = notice {
+        let _ = writeln!(io::stderr(), "{text}");
     }
     outcome
 }

@@ -73,8 +73,12 @@ cprog -i big.iso backup.iso
 $ cp --version
 cp (GNU coreutils) 9.11
 ...
+Written by Torbjörn Granlund, David MacKenzie, and Jim Meyering.
+
 cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
 ```
+
+빈 줄 하나로 `cp` 출력과 구분하고, 색이 허용되면 흐리게(dim) 표시한다(‑ `NO_COLOR`를 존중).
 
 파이프·리다이렉트·스크립트에서는 이 줄이 **붙지 않는다**(‑ `cp`와 바이트 동일 유지). 스크립트에서
 버전을 알아야 하면 `cargo install --list`나 패키지 관리자를 쓴다.
