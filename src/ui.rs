@@ -24,8 +24,8 @@ use unicode_width::UnicodeWidthStr;
 
 /// Log rows always left visible above the footer (docs/ui.md `min_log_rows`, default 2).
 const MIN_LOG_ROWS: u16 = 2;
-/// The footer occupies a single row.
-const FOOTER_ROWS: u16 = 1;
+/// The footer always occupies two rows: the file name (or a blank separator) and the bar.
+const FOOTER_ROWS: u16 = 2;
 /// Column separator between footer fields.
 const SEP: &str = "  ";
 /// Quantized bar widths — all divisors of 100, so each cell is a clean percent (10/5/2/1 %).
@@ -64,8 +64,35 @@ pub fn footer_for(
     state: Option<&ProgressState>,
     size: TerminalSize,
     style: Style,
-) -> Option<String> {
-    render_footer(size, state?, style)
+    show_name: bool,
+) -> Option<Footer> {
+    let state = state?;
+    let bar = render_footer(size, state, style)?;
+    // Row one names the file, or is blank when `-v` already did it just above. Blank rather than
+    // absent so the footer keeps one height, one erase count and one code path — and the empty
+    // row is what makes the two-region model visible (docs/ui.md "왜 항상 2줄인가").
+    let name = if show_name {
+        name_row(&state.name, size.cols as usize, style)
+    } else {
+        String::new()
+    };
+    Some(Footer { name, bar })
+}
+
+/// The footer's two rows, ready to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Footer {
+    /// Row one: the destination path, or empty when `-v` is showing it in the log instead.
+    pub name: String,
+    /// Row two: the progress bar and its figures.
+    pub bar: String,
+}
+
+impl Footer {
+    /// The rows top to bottom, as [`crate::render::FooterGuard::draw`] wants them.
+    pub fn rows(&self) -> [&str; 2] {
+        [&self.name, &self.bar]
+    }
 }
 
 /// Render the footer for `state` at terminal `size`, or `None` when the terminal is too
@@ -109,6 +136,46 @@ pub fn render_footer(size: TerminalSize, state: &ProgressState, style: Style) ->
     }
     // Last resort on an absurdly narrow terminal: percent alone, even if it overflows.
     Some(pct_s)
+}
+
+/// The footer's first row: the destination path, fitted to `cols` display columns.
+///
+/// Without `-v` this row is the only thing on screen naming the file, so the **tail** is what
+/// matters — the front is dropped and marked with an ellipsis rather than the other way round
+/// (docs/ui.md "footer 1행 — 파일 이름").
+///
+/// Two properties are load-bearing rather than cosmetic, because the footer is two rows and its
+/// erase path moves the cursor up one line: a row wider than the terminal gets folded, which
+/// desynchronises that arithmetic (docs/ui.md invariant 7).
+///
+/// * Control characters are stripped first. A path read back from `/proc/<pid>/fd` may legally
+///   contain a newline, and emitting one would add a row nobody is counting.
+/// * Fitting is by display width and stops on character boundaries, so a two-column CJK glyph is
+///   never half-emitted and never spills over.
+fn name_row(path: &str, cols: usize, style: Style) -> String {
+    let clean: String = path.chars().filter(|c| !c.is_control()).collect();
+    if cols == 0 || clean.is_empty() {
+        return String::new();
+    }
+    if clean.width() <= cols {
+        return clean;
+    }
+    let ellipsis = if style.unicode { "…" } else { "..." };
+    let Some(room) = cols.checked_sub(ellipsis.width()) else {
+        return String::new(); // not even the marker fits
+    };
+    // Walk back from the end, taking whole characters while they still fit.
+    let mut taken = 0usize;
+    let mut start = clean.len();
+    for (idx, ch) in clean.char_indices().rev() {
+        let w = ch.to_string().width();
+        if taken + w > room {
+            break;
+        }
+        taken += w;
+        start = idx;
+    }
+    format!("{ellipsis}{}", &clean[start..])
 }
 
 /// A footer segment: a fixed-width text field or the progress bar.
@@ -320,6 +387,82 @@ fn format_eta(eta: Option<Duration>) -> String {
 }
 
 #[cfg(test)]
+mod name_row_tests {
+    use super::*;
+
+    fn plain(path: &str, cols: usize) -> String {
+        name_row(path, cols, Style::plain())
+    }
+
+    #[test]
+    fn a_path_that_fits_is_untouched() {
+        assert_eq!(plain("/mnt/a.iso", 40), "/mnt/a.iso");
+        assert_eq!(plain("/mnt/a.iso", 10), "/mnt/a.iso", "exactly the width still fits");
+    }
+
+    #[test]
+    fn a_long_path_loses_its_front_not_its_tail() {
+        // The tail is the part worth keeping — that is where the file name is.
+        let got = plain("/mnt/backup/2026/win11-vm/win11.qcow2", 22);
+        assert_eq!(got, "…/win11-vm/win11.qcow2");
+        assert_eq!(got.width(), 22, "fills the width exactly, never exceeds it");
+        assert!(got.ends_with("win11.qcow2"), "the file name survives: {got:?}");
+    }
+
+    #[test]
+    fn truncation_is_by_display_width_not_bytes() {
+        // Hangul and CJK occupy two columns each; cutting by bytes would overflow the row and
+        // the terminal would fold it, desynchronising the two-row erase (ui.md invariant 7).
+        let path = "/사진/여행/제주도/한라산.jpg";
+        for cols in 1..=path.width() + 4 {
+            let got = name_row(path, cols, Style::plain());
+            assert!(got.width() <= cols, "cols {cols}: {got:?} is {} wide", got.width());
+        }
+    }
+
+    #[test]
+    fn a_wide_character_is_never_split_in_half() {
+        // Dropping half a character would emit an invalid sequence, not a narrower row.
+        let got = name_row("/사진/한라산.jpg", 10, Style::plain());
+        assert!(got.width() <= 10);
+        assert!(got.chars().all(|c| c != '\u{fffd}'), "no replacement chars: {got:?}");
+    }
+
+    #[test]
+    fn control_characters_are_removed_before_fitting() {
+        // A path from /proc/<pid>/fd can legally contain a newline. Emitting one would push the
+        // footer past its row count and corrupt the screen (ui.md invariant 7, exceptions C5).
+        let got = name_row("/mnt/we\nird\ta\u{1b}[31m.iso", 40, Style::plain());
+        assert!(!got.contains('\n') && !got.contains('\r'), "no newlines: {got:?}");
+        assert!(!got.chars().any(|c| c.is_control()), "no control characters: {got:?}");
+        assert!(got.ends_with(".iso"), "the readable part survives: {got:?}");
+    }
+
+    #[test]
+    fn the_ellipsis_follows_the_glyph_style() {
+        let unicode = name_row("/very/long/path/to/a.iso", 12, Style::plain());
+        assert!(unicode.starts_with('…'), "one column when UTF-8: {unicode:?}");
+
+        let ascii = Style { color: false, unicode: false };
+        let fallback = name_row("/very/long/path/to/a.iso", 12, ascii);
+        assert!(fallback.starts_with("..."), "three columns otherwise: {fallback:?}");
+        assert!(fallback.width() <= 12);
+    }
+
+    #[test]
+    fn a_width_too_small_for_anything_yields_nothing() {
+        assert_eq!(plain("/mnt/a.iso", 0), "");
+        // Not even the ellipsis fits in a single column? It does — it is one column wide.
+        assert_eq!(plain("/mnt/a.iso", 1), "…");
+    }
+
+    #[test]
+    fn an_empty_path_stays_empty() {
+        assert_eq!(plain("", 40), "");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::progress::ProgressState;
@@ -457,7 +600,7 @@ mod tests {
     fn footer_suppressed_when_terminal_too_short() {
         assert_eq!(render_footer(TerminalSize::new(80, 2), &state(), Style::plain()), None);
         assert_eq!(render_footer(TerminalSize::new(80, 1), &state(), Style::plain()), None);
-        assert!(render_footer(TerminalSize::new(80, 3), &state(), Style::plain()).is_some());
+        assert!(render_footer(TerminalSize::new(80, 4), &state(), Style::plain()).is_some());
     }
 
     // ---- width-based shedding order (measured on plain style) -------------------------
@@ -570,22 +713,23 @@ mod tests {
 
     #[test]
     fn footer_for_hidden_when_not_slow() {
-        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain()), None);
+        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain(), true), None);
     }
 
     #[test]
     fn footer_for_hidden_when_slow_but_no_state_yet() {
-        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain()), None);
+        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain(), true), None);
     }
 
     #[test]
     fn footer_for_shown_when_slow_with_state() {
-        let line = footer_for(Some(&state()), TerminalSize::new(80, 24), Style::plain());
+        let line = footer_for(Some(&state()), TerminalSize::new(80, 24), Style::plain(), false)
+            .map(|f| f.bar);
         assert!(line.is_some_and(|l| l.contains('%')));
     }
 
     #[test]
     fn footer_for_respects_size_suppression() {
-        assert_eq!(footer_for(Some(&state()), TerminalSize::new(80, 2), Style::plain()), None);
+        assert_eq!(footer_for(Some(&state()), TerminalSize::new(80, 2), Style::plain(), true), None);
     }
 }

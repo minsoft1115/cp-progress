@@ -148,10 +148,10 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
             let source = source_for(dest_fd, &cur.sources)
                 .and_then(|src| self.stat.stat(&src).ok());
             let total = source.map(|st| st.size);
-            let name = dest
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            // The whole path, not just the base name: without `-v` the footer's first row is
+            // the only thing naming the file, and it is truncated from the front — which needs a
+            // front to drop (docs/ui.md "footer 1행 — 파일 이름").
+            let name = dest.to_string_lossy().into_owned();
             self.current = Some(CurrentModel {
                 dest: dest.clone(),
                 name,
@@ -322,7 +322,7 @@ mod tests {
 
         stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
         let a = s.tick(t0).sample().unwrap();
-        assert_eq!(a.name, "a.iso");
+        assert_eq!(a.name, "/dst/a.iso", "the whole destination path");
         assert_eq!(a.total, Some(1000));
         assert_eq!(a.done, 200);
 
@@ -396,7 +396,7 @@ mod tests {
         // The destination grows; the decoy does not.
         stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
-        assert_eq!(st.name, "a.iso", "the growing file is the destination");
+        assert_eq!(st.name, "/dst/a.iso", "the growing file is the destination");
         assert_eq!(st.done, 400);
         assert_eq!(st.total, Some(1000));
     }
@@ -425,11 +425,11 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(s.tick(t0), Tick::Skip);
         stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
-        assert_eq!(s.tick(t0 + Duration::from_millis(100)).sample().unwrap().name, "a.iso");
+        assert_eq!(s.tick(t0 + Duration::from_millis(100)).sample().unwrap().name, "/dst/a.iso");
 
         // Nothing changes this tick: stay on a.iso.
         let st = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
-        assert_eq!(st.name, "a.iso", "a stalled copy keeps its bar");
+        assert_eq!(st.name, "/dst/a.iso", "a stalled copy keeps its bar");
         assert_eq!(st.done, 400);
     }
 
@@ -450,7 +450,7 @@ mod tests {
         stat.set("/dst/a.iso", Ok(FileStat { size: 110 })); // +10
         stat.set("/tmp/decoy.log", Ok(FileStat { size: 9000 })); // +8960
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
-        assert_eq!(st.name, "decoy.log", "the biggest gainer is what is being written");
+        assert_eq!(st.name, "/tmp/decoy.log", "the biggest gainer is what is being written");
     }
 
     #[test]
@@ -494,7 +494,7 @@ mod tests {
 
         stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
-        assert_eq!(st.name, "a.iso", "destination by growth (#6)");
+        assert_eq!(st.name, "/dst/a.iso", "destination by growth (#6)");
         assert_eq!(st.total, Some(800), "source by fd pairing (#11)");
         assert_eq!(st.done, 400);
     }
@@ -629,7 +629,7 @@ mod tests {
         stat.set("/src/b", Ok(FileStat { size: 2000 }));
         stat.set("/dst/b", Ok(FileStat { size: 100 }));
         let b = s.tick(Instant::now() + Duration::from_secs(2)).sample().unwrap();
-        assert_eq!(b.name, "b");
+        assert_eq!(b.name, "/dst/b");
         assert_eq!(b.total, Some(2000));
         assert_eq!(b.done, 100);
     }

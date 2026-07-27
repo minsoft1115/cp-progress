@@ -58,7 +58,7 @@ use render::FooterGuard;
 use sampler::{LinuxStatSource, Sampler, Tick};
 use slowfile::SlowTimer;
 use term::TerminalSize;
-use ui::{footer_for, Style};
+use ui::{footer_for, Footer, Style};
 
 /// Top-level orchestration entry point (docs/architecture.md "상위 흐름").
 ///
@@ -158,6 +158,9 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     let suspend = Arc::new(AtomicBool::new(false));
     let _ = signal_hook::flag::register(SIGTSTP, Arc::clone(&suspend));
 
+    // Row one names the file only when nothing else does: with `-v` the line just above already
+    // says it, so the row stays blank and acts as a separator instead (#20).
+    let show_name = !verbose_present;
     let style = term::detect_style();
     let threshold = env_ms(
         "CPROG_SLOW_THRESHOLD_MS",
@@ -181,7 +184,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     let stdout_reader = {
         let slow = Arc::clone(&slow);
         let tx = tx.clone();
-        thread::spawn(move || capture::relay_stdout(stdout, &slow, &tx))
+        thread::spawn(move || capture::relay_stdout(stdout, &slow, &tx, verbose_present))
     };
     let stderr_reader = thread::spawn(move || capture::relay_bytes(stderr, &tx)); // moves last tx
 
@@ -294,23 +297,24 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                         None
                     } else {
                         refresh_size(&resized, &mut size, &mut last_size_query);
-                        footer_now(&progress, size, style)
+                        footer_now(&progress, size, style, show_name)
                     };
                     progress_shown |= footer.is_some();
-                    let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice), footer.as_deref());
+                    let rows = footer.as_ref().map(Footer::rows);
+                    let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice), rows.as_ref().map(|r| &r[..]));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     let footer = if suppressed || lock_shared(&progress).is_none() {
                         None
                     } else {
                         refresh_size(&resized, &mut size, &mut last_size_query);
-                        footer_now(&progress, size, style)
+                        footer_now(&progress, size, style, show_name)
                     };
                     progress_shown |= footer.is_some();
                     let _ = match footer {
                         // Withheld while an unterminated log line is on screen, so the periodic
                         // redraw cannot clobber it either (#4, docs/ui.md invariant 10).
-                        Some(text) => guard.draw_unless_line_pending(&text),
+                        Some(f) => guard.draw_unless_line_pending(&f.rows()),
                         None => guard.erase(),
                     };
                 }
@@ -373,8 +377,9 @@ fn footer_now(
     progress: &Mutex<Option<ProgressState>>,
     size: TerminalSize,
     style: Style,
-) -> Option<String> {
-    footer_for(lock_shared(progress).as_ref(), size, style)
+    show_name: bool,
+) -> Option<Footer> {
+    footer_for(lock_shared(progress).as_ref(), size, style, show_name)
 }
 
 /// Lock shared render state, tolerating a poisoned mutex. The shared values — the slow-file

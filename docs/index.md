@@ -13,7 +13,7 @@
 - [`overview.md`](./overview.md) — 목표, 확정 컨셉, non-goals
 - [`ui.md`](./ui.md) — 2영역 화면과 footer 바 (예제 포함)
 - [`capture-and-verbose.md`](./capture-and-verbose.md) — `-v` 주입·캡처·중계 방식,
-  그리고 `-v`를 왜 "파싱"이 아니라 "타이밍+활동표시"로만 쓰는지
+  `-v`를 왜 파싱하지 않는지, 그리고 왜 **요청받았을 때만** 보여주는지
 - [`progress-model.md`](./progress-model.md) — per-file 바를 어떻게 계산하나
   (`/proc/<pid>/fd` + `stat().st_size`)
 - [`runtime-model.md`](./runtime-model.md) — managed-TUI vs passthrough 선택
@@ -28,8 +28,9 @@
 
 ## 한 문단 요약
 
-리눅스 대화형 터미널에서 `cprog`는 `-v`를 주입하고 `cp` 출력을 캡처해, 스크롤되는
-로그 영역으로 다시 흘려준다(그 스크롤 자체가 "살아있다"는 신호다). 한 파일이 짧은
+리눅스 대화형 터미널에서 `cprog`는 `-v`를 주입하고 `cp` 출력을 캡처한다. 그 출력을 화면에
+흘려주는 것은 **사용자가 `-v`를 직접 줬을 때뿐**이고, 아니면 타이밍 판정에만 쓰고 버린다 —
+요청하지 않은 출력을 쏟지 않는다. 한 파일이 짧은
 임계 시간보다 오래 걸리면, `cprog`는 `/proc/<pid>/fd`로 그 파일을 찾아 `stat`으로 커지는
 크기를 읽고, footer에 per-file 진행바를 그린다 — 그 파일(과 복사)이 끝나면 바는
 사라진다. footer가 안전하지 않은 곳(파이프/비-TTY/CI/비-리눅스)에서는 `cp`를 그대로,

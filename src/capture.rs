@@ -17,9 +17,21 @@ use std::time::Instant;
 use crate::slowfile::SlowTimer;
 use crate::verbose::LinePulse;
 
-/// Read `cp`'s stdout: detect `-v` line boundaries to pulse the slow timer, and relay every
-/// byte to the main writer. Stops on EOF or a closed relay channel.
-pub(crate) fn relay_stdout(mut reader: impl Read, slow: &Mutex<SlowTimer>, tx: &SyncSender<Vec<u8>>) {
+/// Read `cp`'s stdout: detect `-v` line boundaries to pulse the slow timer, and — only when the
+/// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
+/// relay channel.
+///
+/// `-v` is injected either way, because the slow-file timer has nothing else to go on. But the
+/// bytes only reach the terminal when they were requested: cprog otherwise floods the scrollback
+/// with output the user never asked for, which is the one place it visibly differs from plain
+/// `cp` (docs/capture-and-verbose.md). With `relay` false the loop counts newlines and drops the
+/// rest, which also removes the per-file channel round-trip, wake-up and allocation (#18).
+pub(crate) fn relay_stdout(
+    mut reader: impl Read,
+    slow: &Mutex<SlowTimer>,
+    tx: &SyncSender<Vec<u8>>,
+    relay: bool,
+) {
     let mut pulse = LinePulse::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -29,7 +41,7 @@ pub(crate) fn relay_stdout(mut reader: impl Read, slow: &Mutex<SlowTimer>, tx: &
                 if pulse.feed(&buf[..n]) > 0 {
                     crate::lock_shared(slow).on_pulse(Instant::now());
                 }
-                if tx.send(buf[..n].to_vec()).is_err() {
+                if relay && tx.send(buf[..n].to_vec()).is_err() {
                     break;
                 }
             }
@@ -65,7 +77,7 @@ mod tests {
         // held back waiting for a line boundary.
         let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
-        relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx);
+        relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx, true);
         drop(tx);
         let relayed: Vec<u8> = rx.into_iter().flatten().collect();
         assert_eq!(relayed, b"'a' -> ", "partial line relayed immediately");
@@ -76,11 +88,24 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         let t0 = Instant::now();
-        relay_stdout(Cursor::new(b"'a' -> 'b'\n".to_vec()), &slow, &tx);
+        relay_stdout(Cursor::new(b"'a' -> 'b'\n".to_vec()), &slow, &tx, true);
         drop(tx);
         let _: Vec<u8> = rx.into_iter().flatten().collect();
         // The `-v` line registered a pulse, so the item is slow once the threshold elapses.
         assert!(slow.lock().unwrap().is_slow(t0 + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn without_verbose_the_bytes_are_dropped_but_the_timer_still_pulses() {
+        // #20: `-v` is injected for timing whether or not the user asked for it, so the pulse
+        // must survive; the bytes must not, or cprog floods a scrollback nobody asked to fill.
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        let t0 = Instant::now();
+        relay_stdout(Cursor::new(b"'a' -> 'b'\n".to_vec()), &slow, &tx, false);
+        drop(tx);
+        assert!(rx.into_iter().next().is_none(), "nothing relayed");
+        assert!(slow.lock().unwrap().is_slow(t0 + Duration::from_millis(150)), "still timed");
     }
 
     #[test]

@@ -11,12 +11,13 @@
 `cprog` is a thin wrapper around the system `cp`. It overlays a per-file progress bar **only in a
 Linux interactive terminal** (the progress feature is Linux-only, needing `/proc`); anywhere a
 footer would not be safe — a pipe, a redirect, CI, non-Linux, a background job — it behaves
-**transparently, byte-for-byte identical to `cp`**. It runs the real `cp`, relays `cp -v` output above, and draws a footer progress bar
-**only for files that take a while**, erasing it when done. No external `progress` command, no
-hidden PTY, no screen-scraping.
+**transparently, byte-for-byte identical to `cp`**. It runs the real `cp` and draws a two-row
+footer **only for files that take a while**, erasing it when done. `cp -v` output is relayed only
+if you asked for `-v`; otherwise cprog stays as quiet as `cp` and names the file in the footer
+instead. No external `progress` command, no hidden PTY, no screen-scraping.
 
 ```
-  'a.iso' -> '/mnt/backup/a.iso'
+  …/backup/2026/win11-vm/win11.qcow2
   ████████████░░░░░░░░   62.33 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
 ```
 
@@ -24,9 +25,10 @@ hidden PTY, no screen-scraping.
 
 - The real copy is done by `cp`, and its semantics are untouched. `cp`'s exit code is the final
   authority.
-- In managed mode it injects and captures `-v` to relay the log above (that scrolling is the
-  "it's alive" signal); when a single file gets slow, it locates it via `/proc/<pid>/fd` and
-  reads the growing size with `stat` to draw its **own progress bar**.
+- In managed mode it injects and captures `-v` for its timing — but relays it to the terminal
+  **only when you passed `-v` yourself**. Without it cprog prints nothing cp would not have
+  printed. When a single file gets slow, it locates that file via `/proc/<pid>/fd` and reads the
+  growing size with `stat` to draw its **own progress bar**, naming the file on the row above.
 - Where a footer isn't safe it falls back to passthrough — streams inherited, environment
   untouched, **byte-identical to `cp`**. That covers: stdout or stderr not a TTY (a pipe or a
   redirect), the two not on the same terminal, `TERM` unset or `dumb`, `CI` set, non-Linux,
