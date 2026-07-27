@@ -27,6 +27,9 @@ pub struct Capabilities {
     /// We are the terminal's foreground process group (i.e. not a background job like
     /// `cprog … &`). A background job must not draw the footer / take over the terminal.
     pub foreground: bool,
+    /// `CPROG_PASSTHROUGH` is set (any value): the user explicitly asked for plain-`cp`
+    /// behavior, whatever the other capabilities say (docs/runtime-model.md, exceptions B16).
+    pub passthrough_forced: bool,
 }
 
 /// The chosen run mode (docs/architecture.md).
@@ -42,6 +45,7 @@ pub enum RunMode {
 /// Managed-TUI requires every condition to hold; otherwise passthrough.
 pub fn decide(caps: &Capabilities, interactive: bool) -> RunMode {
     let managed = !interactive
+        && !caps.passthrough_forced
         && caps.stdout_tty
         && caps.stderr_tty
         && caps.same_terminal
@@ -73,6 +77,7 @@ mod tests {
             linux_proc: true,
             stdbuf: true,
             foreground: true,
+            passthrough_forced: false,
         }
     }
 
@@ -137,6 +142,14 @@ mod tests {
     fn missing_stdbuf_is_passthrough() {
         // docs/capture-and-verbose.md: without stdbuf, -v cannot stream live -> passthrough.
         let caps = Capabilities { stdbuf: false, ..managed_caps() };
+        assert_eq!(decide(&caps, false), RunMode::Passthrough);
+    }
+
+    #[test]
+    fn forced_passthrough_wins_over_everything() {
+        // exceptions B16: CPROG_PASSTHROUGH set -> passthrough even when every managed
+        // condition holds. The user's explicit escape hatch beats all detection.
+        let caps = Capabilities { passthrough_forced: true, ..managed_caps() };
         assert_eq!(decide(&caps, false), RunMode::Passthrough);
     }
 }

@@ -30,7 +30,9 @@ CI·비-리눅스·백그라운드 작업 — 에서는 **투명하게 `cp`와 �
 - footer가 안전하지 않은 곳에서는 passthrough로 내려간다 — 스트림 inherit, env 미변경,
   **`cp`와 바이트 동일**. 해당 조건: stdout/stderr가 TTY가 아님(파이프·리다이렉트), 둘이 서로
   다른 터미널, `TERM` 미설정 또는 `dumb`, `CI` 설정됨, 비-리눅스, `stdbuf` 없음,
-  백그라운드 작업(`cprog … &`), interactive 플래그(`-i`), `--help`/`--version`.
+  백그라운드 작업(`cprog … &`), interactive 플래그(`-i`), `--help`/`--version`, 그리고
+  `CPROG_PASSTHROUGH` 설정됨 — 명시적 탈출구로, 이때는 진짜 `cp`로 exec해 래퍼 프로세스도
+  남지 않는다.
 
 외부 진행률 도구·hidden PTY·화면 스크래핑 없이, `cp` 자신의 `-v` 타이밍과 커널의 `/proc`/`stat`
 만으로 진행을 자체 계산한다.
@@ -144,6 +146,7 @@ cp big.iso /mnt/backup/big.iso   # 느려지면 진행바가 뜬다
 
 | 변수 | 효과 |
 |---|---|
+| `CPROG_PASSTHROUGH` | 강제 passthrough(값 무관) — 버전 한 줄까지 cprog가 덧붙이는 모든 것 끔, 진짜 `cp`로 exec |
 | `CPROG_SLOW_THRESHOLD_MS` | 한 파일이 이만큼 넘게 걸리면 바가 뜬다 (기본 100) |
 | `CPROG_SAMPLE_INTERVAL_MS` | 느린 파일일 때 `stat` 폴링 주기 (기본 100) |
 | `CPROG_RENDER_TICK_MS` | footer 리드로우 tick (기본 125) |

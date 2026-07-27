@@ -55,3 +55,31 @@ fn missing_cp_is_fatal_cpspawn_exit_127() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("cprog: failed to run cp"), "names the failure: {err:?}");
 }
+
+#[test]
+fn failed_exec_with_broken_stderr_still_exits_127() {
+    // The exec path restores SIGPIPE to its default right before exec'ing cp (exceptions A7).
+    // If the exec *fails*, cprog lives on — and must put the runtime's SIGPIPE-ignore back,
+    // or its own best-effort Fatal write to a broken stderr kills it with SIGPIPE (a signal
+    // death, no exit code) instead of surfacing EPIPE and returning 127.
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0, "pipe()");
+    assert_eq!(unsafe { libc::close(fds[0]) }, 0, "close read end");
+    // SAFETY: fds[1] is a fresh, owned pipe fd handed to the child as its stderr.
+    let stderr = unsafe { OwnedFd::from_raw_fd(fds[1]) };
+
+    let status = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .args(["a", "b"])
+        .env("PATH", "") // cp unfindable -> the exec fails and cprog must report it
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr))
+        .status()
+        .expect("spawn cprog");
+
+    assert_eq!(
+        status.code(),
+        Some(127),
+        "a failed exec plus a broken stderr must still exit 127, not die of SIGPIPE: {status:?}"
+    );
+}

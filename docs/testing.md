@@ -12,7 +12,7 @@
   `--suffix`, `--target-directory`) 뒤 인자를 플래그로 오인하지 않기. `-v` 이중 주입 방지
   판정도 여기.
 - **plan** — 주입한 `Capabilities`(TTY, 같은 터미널, CI, `TERM`, `/proc` 가능, `stdbuf`
-  존재)로 `RunMode` 결정. 실제 환경 안 건드림.
+  존재, 강제 passthrough)로 `RunMode` 결정. 실제 환경 안 건드림.
 - **verbose(줄 경계)** — 캡처 바이트 청크(개행이 청크 경계에 걸친 경우 포함)에서 "새 항목"
   펄스가 정확히 나오는지. 내용은 파싱 안 하므로 테스트가 단순하다.
 - **slowfile** — 펄스 시퀀스 + 주입 `Clock`(가상 시간)으로 "느림/빠름" 판정이 임계를
@@ -160,3 +160,6 @@
 | E1 | passthrough에서 env(`QUOTING_STYLE`) | **미변경** → 에러 메시지 로케일까지 동일 | 통합 |
 | E2 | interactive(`-i`) | passthrough(‑ 프롬프트 정상) | 통합 |
 | E3 | 비-TTY/CI/비-리눅스/`stdbuf` 없음 | passthrough, 바이트 동일 | 유닛(plan) + 통합 |
+| E4 | `CPROG_PASSTHROUGH` 설정 | 무조건 passthrough + 버전 한 줄 억제 | 유닛(plan) + 통합(PTY에서 footer·요약·버전줄 없음) |
+| E5 | passthrough의 exec 프로세스 대체 | spawn한 pid의 `comm`이 `cp`가 됨(래퍼 프로세스 없음) | 통합(FIFO로 붙잡아 두고 `/proc/<pid>/comm` 확인) |
+| E6 | exec 후 `SIGPIPE` 의미론 | `cp -v … \| 닫힌 파이프`에서 순정 `cp`와 같은 signal-death | 통합(진짜 `cp`와 종료 상태·stderr 비교) |

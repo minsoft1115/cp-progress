@@ -9,7 +9,8 @@ main
      2. validate (비어있지 않음)                → args
      3. inspect(interactive?) + capabilities 감지 → plan
      4. RunMode 결정 (ManagedTui | Passthrough)   → plan
-     5a. Passthrough: cp spawn(inherit) → wait → exit
+     5a. Passthrough: cp로 exec(프로세스 대체 — 이후는 cp 그 자체)
+         (‑ --help/--version에 버전 한 줄을 붙일 때만 spawn(inherit) → wait → notice)
      5b. ManagedTui:  cp spawn(stdbuf -oL + -v 주입, stdout/stderr capture)
                       ├─ relay: 캡처 → 로그 영역(sole writer) + 줄경계 타이밍
                       ├─ slow-timer: 100ms 넘으면 현재 파일 "느림"
@@ -17,6 +18,7 @@ main
                       └─ render: ProgressState → footer 바 (느릴 때만)
                       → wait → footer 지움 → 요약 → exit
      6. cp status → ExitDisposition → finalize(시그널 보존)
+        (‑ exec된 passthrough는 해당 없음 — cp가 곧 그 프로세스라 보존할 것이 없다)
 ```
 
 두 규칙: **실행 전에 정책 확정**, **실행 후 `cp` 결과 보존**.
@@ -37,7 +39,7 @@ main
 | `progress.rs` | `ProgressState` 모델(현재 파일 done/total/rate/eta) |
 | `ui.rs` | footer 레이아웃 + 바 렌더 + 폭 축약 |
 | `render.rs` | 터미널 writer, 커서/erase 시퀀스, `FooterGuard`(RAII 화면복구) |
-| `process.rs` | `cp` spawn(managed는 `stdbuf -oL` + `-v` 래핑), wait, PID 확보 |
+| `process.rs` | `cp` spawn(managed는 `stdbuf -oL` + `-v` 래핑) / passthrough exec(프로세스 대체), wait, PID 확보 |
 | `messages.rs` | 요약 문자열, `Fatal` 타입 |
 | `term.rs` | TTY 검사, 터미널 크기(`TIOCGWINSZ`), `SIGWINCH` 플래그 + 저빈도 폴백 재조회 |
 | `exit.rs` | `ExitDisposition` → 시그널 보존 finalize |
