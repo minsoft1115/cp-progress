@@ -39,6 +39,20 @@ instead. No external `progress` command, no hidden PTY, no screen-scraping.
 It computes progress itself from `cp`'s own `-v` timing and the kernel's `/proc`/`stat` — no
 external progress tool, no hidden PTY, no screen-scraping.
 
+## Escape hatch
+
+Set `CPROG_PASSTHROUGH` (any value) and cprog gets out of the way entirely: passthrough is
+forced over every other condition, nothing is added — not even the `--version` line — and cprog
+**execs the real `cp` in place**, so `$!`, signals and exit codes are cp's own, with no wrapper
+process left.
+
+```bash
+CPROG_PASSTHROUGH=1 cp -r photos backup   # this one copy, exactly plain cp
+export CPROG_PASSTHROUGH=1                # this whole shell (unset to restore)
+```
+
+To bypass cprog altogether there is always `\cp` (or `command cp`), which skips the alias.
+
 ## Why cprog — vs. the alternatives
 
 "Show cp's progress" already has answers. The question is: **is it still the real `cp`, and what
@@ -46,20 +60,26 @@ does the progress cost you?**
 
 | | `progress` | `advcpmv` | `cpx` | `rsync` | **cprog** |
 |---|---|---|---|---|---|
-| Still the real `cp`? | ✓ watches real cp | △ patched cp fork | ✗ Rust rewrite | ✗ different tool | ✓ wraps real cp |
-| How you invoke it | a **separate command** each time (`progress -mp …` / `watch progress`) | `advcp -g …` (patched binary) | `cpx …` (new command) | `rsync -a --info=progress2 …` | just `cp …` (alias) |
-| Install | distro package | **recompile coreutils** | cargo install | usually preinstalled | `cargo install` / one-liner |
-| Tracks latest coreutils | n/a | **lags** — every coreutils release needs the patch re-ported | n/a (own code) | n/a | rides system cp — always current |
-| Risk of changing cp's behavior | none | patched / old fork | **reimplementation may differ** | **rsync semantics differ** | none — runs your real cp |
-| Progress accuracy | `pos`-based (weak on reflink/network) | high | high | high | approximate, per-file |
+| Still the real `cp`? | ✓ watches the real cp from outside | △ GNU cp, but a patched rebuild | ✗ Rust rewrite | ✗ different tool | ✓ wraps the real cp |
+| How you invoke it | a **second command** alongside every copy (`progress -mp $!` / `watch progress`) | `advcp -g …` (or alias it over `cp`) | `cpx …` — new command, args partly cp-compatible | `rsync -a --info=progress2 …` — its own argument language | `cprog <cp args…>` — arguments identical to cp's; the installer aliases `cp` to it |
+| Install | distro package | **patch + recompile coreutils** | `cargo install` / AUR | usually preinstalled | `cargo install` / one-liner |
+| Tracks latest coreutils | ✓ nothing to port — observes whatever cp runs | **lags by construction** — the patch is a rebase onto each coreutils release | n/a (own code) | n/a | ✓ rides the system cp — always current |
+| Risk of changing cp's behavior | none | low — GNU cp plus a patch, pinned to the patch's coreutils version | **reimplementation may differ** (partial flag coverage, parallel I/O) | **rsync semantics differ** (trailing slash, attribute defaults) | none — runs your real cp |
+| Progress accuracy | reads fd seek positions — **blind on modern fast paths** (reflink `FICLONE`, coreutils 9.x `copy_file_range`) and weak on network mounts | high (counts in-process) | high (counts in-process) | high (whole transfer) | approximate, per-file |
 
 What the table says:
 
-- **`progress`** — real cp, but every copy needs an **extra command**; it isn't integrated.
-- **`advcpmv`** — *is* cp, but a **recompiled fork that lags upstream by construction**: the patch
-  has to be re-ported to each new coreutils release, so a gap is structural rather than incidental.
-- **`cpx` / `rsync`** — **not `cp`** at all (a reimplementation / a different tool), so behavior
-  can differ (`rsync`'s trailing-slash rule and attribute defaults especially).
+- **`progress`** — real cp and nothing to re-port, but every copy needs a **second command**, and
+  its measurement (fd seek position) goes dark exactly where modern coreutils goes fast:
+  reflink and `copy_file_range` copies leave the fd position at 0. That failure mode is why
+  cprog reads the destination's growing `st_size` instead
+  ([`docs/progress-model.md`](./docs/progress-model.md)).
+- **`advcpmv`** — *is* GNU cp, but a **recompiled build that lags upstream by construction**: the
+  patch is a rebase onto each coreutils release, so your `cp` is pinned to whatever version the
+  patch currently targets rather than what your distro ships.
+- **`cpx` / `rsync`** — **not `cp`** at all (a from-scratch Rust reimplementation / a different
+  tool), so behavior can differ — `cpx` covers part of cp's flag surface and parallelizes I/O;
+  `rsync`'s trailing-slash rule and attribute defaults are classic traps.
 - **cprog** — it's **just `cp` with a progress bar**: light install, always the current system
   cp, behavior unchanged. The only cost is that the bar is approximate.
 

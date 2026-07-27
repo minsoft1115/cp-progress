@@ -37,6 +37,20 @@ CI·비-리눅스·백그라운드 작업 — 에서는 **투명하게 `cp`와 �
 외부 진행률 도구·hidden PTY·화면 스크래핑 없이, `cp` 자신의 `-v` 타이밍과 커널의 `/proc`/`stat`
 만으로 진행을 자체 계산한다.
 
+## 탈출구
+
+`CPROG_PASSTHROUGH`를 설정하면(값 무관) cprog가 완전히 비켜선다: 다른 어떤 조건보다 우선해
+passthrough가 강제되고, `--version` 한 줄까지 아무것도 덧붙이지 않으며, 진짜 `cp`로 **exec해
+프로세스 자체가 cp가 된다** — `$!`·시그널·exit code 전부 cp 본인 것이고 래퍼 프로세스도 남지
+않는다.
+
+```bash
+CPROG_PASSTHROUGH=1 cp -r photos backup   # 이 복사 한 번만 순정 cp 그대로
+export CPROG_PASSTHROUGH=1                # 이 셸 전체 (unset으로 복귀)
+```
+
+cprog를 아예 우회하려면 alias를 건너뛰는 `\cp`(또는 `command cp`)가 언제나 있다.
+
 ## 왜 cprog인가 — 대안들과 비교
 
 "cp 진행바"엔 이미 답이 여럿 있다. 핵심 질문은: **여전히 진짜 `cp`인가, 그리고 진행바의 대가가
@@ -44,19 +58,25 @@ CI·비-리눅스·백그라운드 작업 — 에서는 **투명하게 `cp`와 �
 
 | | `progress` | `advcpmv` | `cpx` | `rsync` | **cprog** |
 |---|---|---|---|---|---|
-| 진짜 `cp`인가? | ✓ 진짜 cp를 옆에서 봄 | △ 패치된 cp 포크 | ✗ Rust 재구현 | ✗ 다른 도구 | ✓ 진짜 cp를 감쌈 |
-| 어떻게 실행하나 | 매번 **별도 명령**(`progress -mp …` / `watch progress`) | `advcp -g …`(패치 바이너리) | `cpx …`(새 명령) | `rsync -a --info=progress2 …` | **그냥 `cp …`**(alias) |
-| 설치 | 배포판 패키지 | **coreutils 재컴파일** | cargo install | 대개 기본 설치 | `cargo install`/한 줄 |
-| 최신 coreutils 추종 | 해당없음 | **뒤처짐** — coreutils 릴리스마다 패치를 다시 포팅해야 함 | 해당없음(자체 코드) | 해당없음 | 시스템 cp에 얹혀 항상 최신 |
-| cp 동작 바뀔 위험 | 없음 | 포크(옛 버전) | **재구현이라 다를 수 있음** | **rsync 의미론 다름** | 없음 — 진짜 cp를 그대로 실행 |
-| 진행바 정확도 | `pos` 기반(reflink/네트워크 약함) | 높음 | 높음 | 높음 | 근사·per-file |
+| 진짜 `cp`인가? | ✓ 진짜 cp를 밖에서 관찰 | △ GNU cp이나 패치 후 재빌드 | ✗ Rust 재구현 | ✗ 다른 도구 | ✓ 진짜 cp를 감쌈 |
+| 어떻게 실행하나 | 복사마다 **명령이 하나 더**(`progress -mp $!` / `watch progress`) | `advcp -g …`(또는 alias로 `cp` 대체) | `cpx …` — 새 명령, 인자는 cp와 부분 호환 | `rsync -a --info=progress2 …` — 자체 인자 체계 | `cprog <cp 인자…>` — 인자가 cp와 동일; installer가 `cp`를 alias로 대체 |
+| 설치 | 배포판 패키지 | **패치 + coreutils 재컴파일** | `cargo install` / AUR | 대개 기본 설치 | `cargo install`/한 줄 |
+| 최신 coreutils 추종 | ✓ 포팅할 것이 없음 — 돌고 있는 cp를 관찰 | **구조적으로 뒤처짐** — 패치가 coreutils 릴리스마다 rebase돼야 함 | 해당없음(자체 코드) | 해당없음 | ✓ 시스템 cp에 얹혀 항상 최신 |
+| cp 동작 바뀔 위험 | 없음 | 낮음 — GNU cp + 패치, 단 패치가 겨냥한 버전에 고정됨 | **재구현이라 다를 수 있음**(플래그 부분 커버, 병렬 I/O) | **rsync 의미론 다름**(후행 슬래시·속성 기본값) | 없음 — 진짜 cp를 그대로 실행 |
+| 진행바 정확도 | fd seek 위치 기반 — **현대 fast path에서 못 봄**(reflink `FICLONE`, coreutils 9.x `copy_file_range`), 네트워크 마운트 약함 | 높음(프로세스 안에서 셈) | 높음(프로세스 안에서 셈) | 높음(전체 전송 기준) | 근사·per-file |
 
 표 요약:
 
-- **`progress`** — 진짜 cp지만 복사마다 **명령이 하나 더** 필요(통합 안 됨).
-- **`advcpmv`** — cp이긴 하나 **재컴파일 포크라 구조적으로 뒤처짐**: coreutils 릴리스마다 패치를
-  다시 포팅해야 하므로 간극이 우연이 아니라 필연이다.
-- **`cpx` / `rsync`** — 애초에 **`cp`가 아님**(재구현 / 다른 도구)이라 동작이 다를 수 있음(특히 rsync의 후행 슬래시·속성 기본값).
+- **`progress`** — 진짜 cp고 포팅할 것도 없지만, 복사마다 **명령이 하나 더** 필요하고, 측정
+  방식(fd seek 위치)이 현대 coreutils가 빨라지는 지점에서 정확히 꺼진다 — reflink와
+  `copy_file_range` 복사는 fd 위치가 0에 머문다. 이 실패 모드가 cprog가 대상 파일의 커지는
+  `st_size`를 읽는 이유다([`docs/progress-model.md`](./docs/progress-model.md)).
+- **`advcpmv`** — GNU cp이긴 하나 **재컴파일 빌드라 구조적으로 뒤처짐**: 패치가 coreutils
+  릴리스마다 rebase돼야 하므로, 당신의 `cp`는 배포판이 주는 버전이 아니라 패치가 겨냥한 버전에
+  고정된다.
+- **`cpx` / `rsync`** — 애초에 **`cp`가 아님**(밑바닥부터 Rust 재구현 / 다른 도구)이라 동작이
+  다를 수 있다 — `cpx`는 cp 플래그 표면의 일부를 덮고 I/O를 병렬화하며, `rsync`는 후행
+  슬래시·속성 기본값이 고전적인 함정이다.
 - **cprog** — **그냥 `cp`에 진행바가 얹힌 것**: 설치 가볍고, 항상 최신 시스템 cp, 동작 그대로. 유일한 대가는 **진행바가 근사치**라는 것.
 
 **정직한 트레이드오프:** cprog의 진행은 per-file 근사치(전체 %/ETA 없음)이고 리눅스 대화형
