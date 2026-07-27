@@ -109,8 +109,8 @@ managed 모드의 실질 버전 바닥은 `cp`가 아니라 **`stdbuf`(coreutils
 ## 중계는 best-effort (cp exit code 절대 안 덮음)
 
 `cp`가 성공(exit 0)했는데 relay/footer 쓰기가 실패(예: EPIPE)해도, 그 실패가 **`cp`의
-결과를 바꾸면 안 된다.** 모든 중계·렌더는 best-effort로, 실패는 `Warning`으로만 남기고
-exit code는 언제나 `cp`에서 나온다.
+결과를 바꾸면 안 된다.** 모든 중계·렌더는 무음 best-effort로(‑ `let _ = ...`, 별도 경고 타입
+없음), exit code는 언제나 `cp`에서 나온다.
 
 ## stderr
 

@@ -8,7 +8,7 @@ main
      1. 인자 수집
      2. validate (비어있지 않음)                → args
      3. inspect(interactive?) + capabilities 감지 → plan
-     4. RunPlan 구성 (ManagedTui | Passthrough)   → plan
+     4. RunMode 결정 (ManagedTui | Passthrough)   → plan
      5a. Passthrough: cp spawn(inherit) → wait → exit
      5b. ManagedTui:  cp spawn(stdbuf -oL + -v 주입, stdout/stderr capture)
                       ├─ relay: 캡처 → 로그 영역(sole writer) + 줄경계 타이밍
@@ -28,7 +28,7 @@ main
 | `main.rs` | 얇은 바이너리 진입 → `cprog::run()` |
 | `lib.rs` | 상위 오케스트레이션, `run()` |
 | `args.rs` | 인자 검증 + interactive/`-v` 최소 검사 |
-| `plan.rs` | capabilities 감지 + `RunPlan` 구성 |
+| `plan.rs` | capabilities 감지 + `RunMode` 결정 |
 | `capture.rs` | `cp` stdout/stderr 캡처 + 로그 영역 중계(sole writer) |
 | `verbose.rs` | 캡처 스트림의 **줄 경계** 감지 = "새 항목" 펄스 (내용 파싱 안 함) |
 | `slowfile.rs` | 펄스 + `Clock` → "현재 파일이 느린가" 판정 |
@@ -38,7 +38,7 @@ main
 | `ui.rs` | footer 레이아웃 + 바 렌더 + 폭 축약 |
 | `render.rs` | 터미널 writer, 커서/erase 시퀀스, `FooterGuard`(RAII 화면복구) |
 | `process.rs` | `cp` spawn(managed는 `stdbuf -oL` + `-v` 래핑), wait, PID 확보 |
-| `messages.rs` | 요약/경고 문자열, `Warning`/`Fatal` 타입 |
+| `messages.rs` | 요약 문자열, `Fatal` 타입 |
 | `term.rs` | TTY 검사, 터미널 크기(`TIOCGWINSZ`), `SIGWINCH` 플래그 + 저빈도 폴백 재조회 |
 | `exit.rs` | `ExitDisposition` → 시그널 보존 finalize |
 
@@ -59,7 +59,6 @@ struct ProgressState {
     eta:   Option<Duration>,
 }
 
-enum Warning { RelayFailed(String), SampleUnavailable, RenderFailed(String) } // 비치명
 enum Fatal   { Usage, CpSpawn(String), CpWait { pid: u32, source: String } }
 ```
 
@@ -75,10 +74,9 @@ enum Fatal   { Usage, CpSpawn(String), CpWait { pid: u32, source: String } }
 ## 에러 철학
 
 - `Fatal`은 **반환**되어 실행을 중단(진짜 블로커: usage, `cp` spawn/wait 실패).
-- `Warning` 타입은 비치명 실패용으로 정의돼 있으나, **현재 relay/render/sample 실패는 무음
-  best-effort**로 처리한다(‑ `let _ = ...`). exit code에 영향 없음. (실패하는 대상이 터미널
-  자체라 그 터미널로 경고를 내보내는 게 신뢰할 수 없어, 방출 sink는 배선하지 않았다. 타입은
-  향후 배선 여지로 남겨둔다.)
+- relay/render/sample 등 cprog-side 비치명 실패는 **무음 best-effort**로 처리한다(‑ `let _ = ...`).
+  exit code에 영향 없음. 별도 `Warning` 타입은 두지 않았다 — 실패하는 대상이 터미널 자체라 그
+  터미널로 경고를 내보내는 게 신뢰할 수 없어, 타입도 방출 sink도 배선하지 않았다.
 - `Fatal` 메시지와 종료 요약(summary)의 stderr 출력도 best-effort다(‑ `let _ = writeln!(…)`):
   그 쓰기가 실패해도(예: stderr가 끊긴 파이프라 `EPIPE`) panic하지 않아 `cp`의 exit code 계약을
   지킨다(`eprintln!`은 실패 시 panic한다).

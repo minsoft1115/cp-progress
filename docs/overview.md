@@ -41,7 +41,7 @@
 - **안 쓰는 것:** 외부 진행률 도구, hidden PTY, VT100 화면 파서, 원본 트리 walk, 파일 카운트.
   (진행률 화면 스크래핑·화면 에뮬레이션 같은 복잡한 계층이 아예 없다.)
 - **쓰는 것(단순):** `-v` 타이밍(느린 파일 감지) + `/proc`/`stat`(현재 파일 진행) +
-  sole-writer footer + RAII 화면복구(`FooterGuard`) + SIGWINCH(+폴백) + `Warning`/`Fatal`
+  sole-writer footer + RAII 화면복구(`FooterGuard`) + SIGWINCH(+폴백) + `Fatal`
   타입 + stderr 요약 + 시그널 보존 종료 + test-hooks feature-gate.
 
 ## 범위 (Scope)

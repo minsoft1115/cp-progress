@@ -3,16 +3,17 @@
 `cprog`는 `cp`를 시작하기 **전에 한 번** managed-TUI인지 passthrough인지 정한다. 이 결정은
 검사한 인자와 감지한 런타임 capabilities의 순수 함수다.
 
-## RunPlan
+## RunMode
+
+`decide(caps, interactive)`는 순수 함수로 모드 하나만 고른다:
 
 ```
-RunPlan {
-    mode:    ManagedTui | Passthrough,
-    summary: bool,   // 종료 시 ✓/✗ 요약 줄을 낼지
-}
+RunMode = ManagedTui | Passthrough
 ```
 
-런타임 상태(캡처 핸들·크기)는 나중에 붙는다. 모드는 확정 후 바뀌지 않는다.
+`summary`는 계획에 담긴 값이 아니라 **런타임 산물**이다 — managed 실행 중 footer가 한 번이라도
+떴는지(`progress_shown`)로 종료 시점에 정한다(아래 "요약 규칙"). 런타임 상태(캡처 핸들·크기)도
+나중에 붙는다. 모드는 확정 후 바뀌지 않는다.
 
 ## Managed TUI 선택 조건 (전부 참일 때만)
 
