@@ -162,7 +162,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 |---|---|---|---|
 | F1 | **바 도중 리사이즈(SIGWINCH)** | 플래그 latch → 다음 tick에 `TIOCGWINSZ` 재조회 → 재배치 | ✅ `term::should_requery_size`, `tests/resize.rs` |
 | F2 | **SIGWINCH 유실/합쳐짐** | 1초 폴백 재조회가 있어 낡은 크기로 고정되지 않음 | ✅ `term.rs::resize_requery_rule` |
-| F3 | **터미널 높이 < 3행** | footer 억제(`rows < MIN_LOG_ROWS + 1`) — 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
+| F3 | **터미널 높이 < 4행** | footer 억제(`rows < MIN_LOG_ROWS + FOOTER_ROWS`) — footer 2행 위에 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
 | F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림 | ✅ `ui.rs` ATTEMPTS |
 | F5 | **극단적으로 좁은 폭**(percent도 안 들어감) | 최후 수단으로 percent만 출력하며 **오버플로우를 허용**. 터미널이 줄바꿈하면 footer가 2행을 차지해 한 줄만 지우는 erase로는 잔상이 남을 수 있음 | 📄 `ui::render_footer` 주석 |
 | F6 | **렌더 중 panic** | `FooterGuard::Drop`이 unwind 중에도 footer 지우고 커서 복원 | ✅ `render.rs::drop_erases_even_on_panic` |

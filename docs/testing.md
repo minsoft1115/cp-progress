@@ -29,8 +29,7 @@
   생략), rate/eta 텍스트 폭이 바뀌어도 흔들리지 않음.
 - **파일명 줄** — 제어문자 제거 → 표시폭 기준 앞자름 → `…`/`...` 폴백. 폭 경계값, CJK(2칸),
   개행이 든 경로, 이름이 폭보다 짧을 때(자르지 않음)까지 단언한다.
-- **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다. (파일명은 footer에 안 넣으므로 이전의
-  name sanitize/truncate 항목은 폐기.)
+- **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다.
 - **render/footer** — `FooterGuard`가 `Drop`에서 지움(정상 + `catch_unwind` panic);
   footer가 `height − min_log_rows`를 안 넘음.
 - **messages/exit** — 요약/경고 포맷, `ExitDisposition` 매핑, 시그널 vs `128+n` 정책.

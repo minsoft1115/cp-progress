@@ -15,7 +15,7 @@
 |---|---|---|---|
 | **`libc`** | 0.2 | `plan.rs`, `term.rs`, `exit.rs`, `process.rs` | 같은 터미널 판정 `fstat`(st_dev/ino), `ioctl(TIOCGWINSZ)`, signal(`sigaction`/self-raise), `prctl(PR_SET_PDEATHSIG)`. rust-lang 공식, 광범위 사용. |
 | **`lexopt`** | 0.3 | `args.rs` | interactive/`-v` 감지 + 값 소비 옵션의 **최소** 검사. 단일 파일·무의존·무매크로. `cp` 인자를 재파싱하지 않는 이 프로젝트에 딱 맞음. |
-| **`unicode-width`** | 0.2 | `ui.rs` | footer 줄 폭을 표시 폭 기준으로 계산(‑ wide/CJK 안전)해 좁은 터미널에서 필드를 버릴지 판단. 파일명은 footer에 넣지 않으므로 truncation엔 쓰지 않는다. unicode-rs 관리, ripgrep 등 광범위 사용. |
+| **`unicode-width`** | 0.2 | `ui.rs` | footer 줄 폭을 표시 폭 기준으로 계산(‑ wide/CJK 안전)해 좁은 터미널에서 필드를 버릴지 판단하고, footer 1행의 파일명(대상 경로)을 표시폭 기준으로 앞에서 자른다(#20). unicode-rs 관리, ripgrep 등 광범위 사용. |
 
 이 셋이 코어다. 나머지는 선택.
 
