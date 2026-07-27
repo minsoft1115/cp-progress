@@ -5,13 +5,14 @@
 벽시계뿐 아니라 프로세스 트리 전체의 CPU 시간(user+sys)을 os.wait4로 받아 함께 본다 —
 추가된 작업량이 직접 드러나고 노이즈가 훨씬 적다.
 
-비용을 4단계로 분해한다:
+비용을 변형별로 분해한다:
   (1) cp                    기준선
-  (2) cp -v                 -v 자체의 비용 (cp가 내는 비용, cprog가 아님)
-  (3) stdbuf -oL cp -v      라인버퍼 강제 비용
-  (4) cprog                 위 전부 + cprog 고유 비용   ->  (4)-(3) 이 순수 오버헤드
+  (2) stdbuf -oL cp -v      -v 주입 + 라인버퍼 강제 비용 (cp/stdbuf가 내는 비용, cprog가 아님)
+  (3) cprog OLD             비교 기준 바이너리 (기본 /tmp/cprog-old, CPROG_OLD로 변경)
+  (4) cprog NEW (-v 없이)   위 전부 + cprog 고유 비용   ->  (4)-(2) 가 순수 오버헤드
+  (5) cprog NEW -v          사용자가 중계를 요청한 경우의 비용
 
-네 변형 모두 PTY에 출력한다. 한쪽만 /dev/null로 두면 "PTY vs /dev/null"을 재게 된다.
+모든 변형이 PTY에 출력한다. 한쪽만 /dev/null로 두면 "PTY vs /dev/null"을 재게 된다.
 """
 import os, pty, select, shutil, statistics, subprocess, sys, threading, time, fcntl, struct, termios
 
@@ -128,10 +129,10 @@ def main():
         base = statistics.median(r[1]+r[2] for r in results["2 stdbuf -oL cp -v"])
         w1 = statistics.median(r[0] for r in results["1 cp"])
         print()
-        for k in ("3 cprog OLD", "4 cprog 현재 (-v 없이)", "5 cprog 현재 -v"):
-            cpu = statistics.median(r[1]+r[2] for r in results[k])
-            w = statistics.median(r[0] for r in results[k])
-            print(f"  ► {k:<22} 고유 CPU {cpu-base:+.3f}s   벽시계 {w:.3f}s ({(w/w1-1)*100:+.1f}% vs cp)")
+        for name, _ in VARIANTS[2:]:  # cprog 변형만; VARIANTS 이름을 그대로 써 키가 어긋날 수 없다
+            cpu = statistics.median(r[1]+r[2] for r in results[name])
+            w = statistics.median(r[0] for r in results[name])
+            print(f"  ► {name:<22} 고유 CPU {cpu-base:+.3f}s   벽시계 {w:.3f}s ({(w/w1-1)*100:+.1f}% vs cp)")
     shutil.rmtree(ROOT, ignore_errors=True)
 
 main()

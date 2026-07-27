@@ -59,8 +59,8 @@ RunMode = ManagedTui | Passthrough
 - `cp` exit n≠0 → `✗ cp exited n - T elapsed`를 **stderr**로(중립 문구 — "failed" 아님)
 - `cp` 시그널 종료 → 요약 **없음**(시그널 의미론 보존)
 
-전부 stderr로 보내 stdout은 `cp` 몫으로 남긴다. 개수/총량을 안 세므로 요약은 최소한
-(경과시간 위주, 단일 파일이면 그 파일 크기 정도).
+전부 stderr로 보내 stdout은 `cp` 몫으로 남긴다. 개수/총량을 안 세므로 요약은 언제나 위
+형태 그대로다(‑ 경과시간뿐).
 
 ## 버전 표시 (`--help` / `--version`)
 

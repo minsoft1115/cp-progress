@@ -52,7 +52,7 @@
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
 | A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않음 → cprog와 cp 모두 기본 동작(전경 그룹 전체가 함께 죽음) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
 | A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). 자식은 `std::process::Command`가 기본 disposition을 복원해 `cp`가 정상적으로 SIGPIPE에 반응 | 🟡 `tests/exit_contract.rs`(stderr가 broken pipe여도 exit code 유지) |
-| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](#a8-note) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
+| A8 | **`cp`가 시그널을 처리할 수 없는 상태에서 cprog가 종료 시그널을 받음** (정지 상태이거나, 끊긴 NFS 등에서 uninterruptible I/O 중) | cp에 시그널을 보낼 때 **`SIGCONT`를 함께** 보내므로, 정지된 cp도 깨어나 시그널을 받고 죽는다 → 파이프가 닫히고 join이 끝난다. *이전에는* 시그널만 보내 정지 상태의 cp가 그대로 남아 join이 무한 대기했다. 다만 uninterruptible(D) 상태는 여전히 못 푼다 — `cp` 단독 실행과 같은 결과이며 [의도적](./process-model.md#정리-cleanup) | ✅ **해결(#5)** — 시그널 전달 시 `SIGCONT` 동반. `lib.rs::run_managed` |
 
 ## Ctrl-Z / job control
 
@@ -61,7 +61,7 @@
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
 | A9 | **Ctrl-Z (`SIGTSTP`) — footer가 떠 있을 때** | 렌더 루프가 플래그를 보고 `FooterGuard::suspend_restore()`로 footer 지움 + 커서 복원 → 그 후 `raise(SIGSTOP)`으로 실제 정지(플래그 핸들러는 유지) → 재개 시 다음 tick에서 커서 재숨김 + footer 재그림 | ✅ `lib.rs::run_managed`, `render::suspend_restore`, `tests/suspend.rs::ctrl_z_restores_terminal_before_stop_then_redraws_on_resume` |
-| A10 | **Ctrl-Z 후 `bg`** (백그라운드 재개) | 재개 시점에 `tcgetpgrp != getpgrp`이면 `suppressed = true` → 이후 footer를 그리지 않음. **단방향**: 다시 `fg`로 돌아와도 그 실행에서는 꺼진 채 유지(다시 Ctrl-Z→`fg` 하면 복구) | ✅ `lib.rs::run_managed`, `tests/suspend.rs::ctrl_z_then_bg_does_not_redraw_footer_in_background` |
+| A10 | **Ctrl-Z 후 `bg`** (백그라운드 재개) | 재개 시점에 `tcgetpgrp != getpgrp`이면 `suppressed = true` → 이후 footer를 그리지 않음. **단방향**: 다시 `fg`로 돌아와도 그 실행에서는 꺼진 채 유지(다시 Ctrl-Z→`fg` 하면 복구) | ✅ `lib.rs::run_managed`, `tests/suspend.rs::ctrl_z_then_bg_does_not_redraw_footer_in_background`, 복구 경로는 `ctrl_z_bg_then_second_ctrl_z_fg_restores_footer` |
 | A11 | **teardown(join/wait) 중 Ctrl-Z** | 렌더 루프가 끝나면 `SIGTSTP`를 `SIG_DFL`로 되돌림. 안 그러면 플래그 핸들러만 남아 정지도 진행도 못 하는 wedge가 됨 | ✅ `lib.rs::restore_default_suspend`, 유닛 `teardown_signal_disposition` |
 | A12 | **Ctrl-Z 동안 `cp`도 함께 정지** | Ctrl-Z는 전경 프로세스 그룹 전체에 전달되므로 `cp`도 정지 → 복사가 실제로 멈춤. 재개하면 이어서 진행(cp의 정상 동작) | 📄 |
 | A13 | **정지→재개 직후 rate/eta가 잠시 비정상** | 재개 시 진행 모델의 rate 히스토리를 **비운다** → 정지 구간이 평균에 섞이지 않고 재개 후 실제 처리량만으로 다시 계산된다. *이전에는* window가 벽시계 기준이라 "긴 시간 동안 진행 0"을 품어, 재개 후 약 1초간 rate가 0에 가깝고 eta가 `--:--`로 나왔다 | ✅ **해결(#9)** — 재개 시 rate 히스토리를 비운다. `progress::reset_samples` + `sampler::reset_rate_history` |
@@ -87,8 +87,8 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B9 | **`cprog a b &`** (백그라운드 실행) | `tcgetpgrp(stdout) != getpgrp()` → `foreground=false` → passthrough. 백그라운드 작업이 터미널을 점거하면 안 되므로 | ✅ `term::is_foreground`, `tests/background.rs` (bug1 / #1) |
 | B10 | **`tcgetpgrp`이 `ENOTTY`** (제어터미널 아님) | 백그라운드임을 **증명할 수 없으므로 관대하게 허용**(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 정상 감지됨 | 🟡 `term::is_foreground` |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
-| B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_without_summary` |
-| B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄) | ✅ `args.rs::missing_required_value_is_scan_error` |
+| B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_but_names_cprog` |
+| B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄) | ✅ `args.rs::missing_required_value_is_scan_error`, 폴백 배선은 `tests/passthrough.rs::scan_error_falls_back_to_passthrough_byte_identical` |
 | B14 | **`sudo cprog` / setuid `cp`** | `stdbuf`는 `LD_PRELOAD` 기반이라 setuid 바이너리에선 무시됨. cp가 setuid인 극히 드문 환경에서는 라이브성이 degrade | 📄 `capture-and-verbose.md` |
 | B15 | **모드는 실행 전에 한 번만 결정** | 실행 중 파이프/TTY 상태가 바뀌어도 모드는 안 바뀐다(단순화). 유일한 런타임 재확인은 A10의 전경 여부 | 📄 `runtime-model.md` |
 
@@ -98,12 +98,12 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
-| C1 | **`cp`가 PATH에 없음 / 실행 불가** | `Fatal::CpSpawn` → stderr 한 줄 + **exit 127**(셸 관례) | ✅ `messages::Fatal`, `messages.rs::cp_spawn_fatal` |
+| C1 | **`cp`가 PATH에 없음 / 실행 불가** | `Fatal::CpSpawn` → stderr 한 줄 + **exit 127**(셸 관례) | ✅ `messages::Fatal`, `messages.rs::cp_spawn_fatal`, 실바이너리 `tests/exit_contract.rs::missing_cp_is_fatal_cpspawn_exit_127` |
 | C2 | **`cp`가 비-0으로 종료** (권한 없음, ENOSPC, `-r` 없이 디렉터리) | cp의 에러를 로그 영역에 relay → footer 지움 → **중립 문구** `✗ cp exited n - T elapsed`(진행바가 떴을 때만) → exit code 그대로 | ✅ `tests/managed.rs::managed_relays_cp_error_and_preserves_exit_code`, `tests/passthrough.rs::preserves_nonzero_exit_on_cp_failure` |
 | C3 | **`wait()` 실패** (예: `ECHILD`) | `Fatal::CpWait { pid, source }` → exit 1 | ✅ `messages.rs::cp_wait_fatal` |
 | C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님) | 🟡 `process::spawn` |
 | C5 | **C4에서 부분 복사된 대상 파일** | `cp`는 SIGTERM에 정리를 하지 않으므로 **잘린 대상 파일이 남는다.** 이는 `cp`를 직접 죽였을 때와 동일한 결과 — 의미론 보존 | 📄 |
-| C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`, `tests/managed.rs`(D7) |
+| C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`; `tests/managed.rs`가 간접 증명(D7 — footer가 떴다는 것 자체가 spawn된 pid로 `cp`의 fd를 읽었다는 뜻) |
 | C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임) | 🟡 |
 | C8 | **자식은 하나뿐** | 외부 progress 도구도 hidden PTY도 없으므로 누수될 helper 프로세스 자체가 없다 | 📄 |
 
@@ -152,7 +152,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E22 | **`Basis::Blocks` 오검출(ext4 delayed allocation)** | 판정 분기가 **없다** — 언제나 `st_size`로 잰다. *이전에는* 선할당 판정 조건이 ext4 지연 할당과 같은 모양이라, 첫 샘플이 그 순간에 걸리면 blocks 기준으로 고정돼 바가 0% 근처에 머물 수 있었다. `cp`가 하지 않는 동작을 막자고 리눅스 기본 파일시스템에서 틀릴 위험을 안고 있던 셈 | ✅ **해결(#12)** — `Basis` 제거, 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
 | E19 | **아주 빠른 파일** | 첫 샘플 전에 끝남 → 바 없이 지나감(의도된 동작) | 📄 |
-| E20 | **샘플링 비용** | 느린 파일일 때만 `readlink` 1회 + `stat` 1~2회/100ms. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
+| E20 | **샘플링 비용** | 느린 파일일 때만, tick(기본 100ms)마다 `/proc/<pid>/fd` 열거(항목마다 readlink + 종류·모드 조회) + `stat` 1~2회. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
 
 ---
 
@@ -162,7 +162,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 |---|---|---|---|
 | F1 | **바 도중 리사이즈(SIGWINCH)** | 플래그 latch → 다음 tick에 `TIOCGWINSZ` 재조회 → 재배치 | ✅ `term::should_requery_size`, `tests/resize.rs` |
 | F2 | **SIGWINCH 유실/합쳐짐** | 1초 폴백 재조회가 있어 낡은 크기로 고정되지 않음 | ✅ `term.rs::resize_requery_rule` |
-| F3 | **터미널 높이 < 3행** | footer 억제(`rows < MIN_LOG_ROWS + 1`) — 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
+| F3 | **터미널 높이 < 4행** | footer 억제(`rows < MIN_LOG_ROWS + FOOTER_ROWS`) — footer 2행 위에 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
 | F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림 | ✅ `ui.rs` ATTEMPTS |
 | F5 | **극단적으로 좁은 폭**(percent도 안 들어감) | 최후 수단으로 percent만 출력하며 **오버플로우를 허용**. 터미널이 줄바꿈하면 footer가 2행을 차지해 한 줄만 지우는 erase로는 잔상이 남을 수 있음 | 📄 `ui::render_footer` 주석 |
 | F6 | **렌더 중 panic** | `FooterGuard::Drop`이 unwind 중에도 footer 지우고 커서 복원 | ✅ `render.rs::drop_erases_even_on_panic` |
@@ -197,7 +197,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
 | H1 | **`CPROG_*_MS`가 숫자가 아님** | 에러 없이 **조용히 기본값**으로 폴백 | 🟡 `lib::env_ms` |
-| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 모든 파일이 즉시 "느림" → 거의 항상 footer가 뜸(테스트에서 이 성질을 이용) | 🟡 |
+| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 모든 파일이 즉시 "느림" → 거의 항상 footer가 뜸(‑ 통합 테스트는 같은 성질을 임계 1ms로 이용) | 🟡 |
 | H3 | **managed의 env 변경 범위** | `QUOTING_STYLE=shell-escape` **하나뿐**. `LC_ALL=C`는 일부러 안 건다 — `-v`를 파싱하지 않으니 이득이 없고, C 로케일은 한글 등 비-ASCII 파일명을 옥타 이스케이프로 깨뜨린다 | ✅ `process.rs::managed_sets_only_quoting_style_not_locale` |
 | H4 | **passthrough의 env** | **전혀 건드리지 않음** → cp의 에러 메시지 로케일까지 바이트 동일 | ✅ `process.rs::passthrough_never_touches_env` |
 | H5 | **Mutex poisoning**(스레드 패닉) | `lock_shared`가 `into_inner()`로 복구. 공유 값(슬로우 타이머·최근 샘플)엔 깨질 불변식이 없고, 여기서 죽으면 `cp`를 wait 못 해 exit code 계약이 깨지므로 | ✅ `lib::lock_shared` |

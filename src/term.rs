@@ -1,5 +1,5 @@
 //! TTY checks, terminal size (`TIOCGWINSZ`), and `SIGWINCH` flag + low-frequency
-//! fallback re-query (docs/runtime-model.md, docs/term).
+//! fallback re-query (docs/runtime-model.md).
 //!
 //! [`detect`] fills the runtime half of [`crate::plan::Capabilities`]; the pure decision
 //! rules (`TERM` acceptable, two fds on the same terminal) are split out and unit-tested,
@@ -153,7 +153,8 @@ fn is_executable_file(p: &Path) -> bool {
 }
 
 /// Terminal dimensions in character cells. Plain data so layout logic (docs/ui.md) can be
-/// unit-tested without querying a real terminal; `TIOCGWINSZ` wiring lands later.
+/// unit-tested without querying a real terminal; [`terminal_size`] does the real
+/// `TIOCGWINSZ` query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalSize {
     /// Width in columns.

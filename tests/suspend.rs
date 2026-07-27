@@ -165,3 +165,85 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
         "cprog redrew the footer after being resumed in the background (bug1 symptom via Ctrl-Z then bg)"
     );
 }
+
+#[test]
+fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
+    // The suppression from A10 is one-way but not permanent: once footer-suppressed by a
+    // background resume, another Ctrl-Z followed by `fg` re-checks the foreground and turns the
+    // footer back on (docs/usage.md "바가 안 뜨는 경우", docs/process-model.md "정리",
+    // exceptions A10). Same rig as the test above, with a second suspend/resume cycle appended.
+    let tmp = TmpDir::new("bgfg");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
+
+    let (prog, argv_o, envp_o) = cprog_exec(&fifo, &dst);
+    let mut argv: Vec<*const c_char> = argv_o.iter().map(|s| s.as_ptr()).collect();
+    argv.push(std::ptr::null());
+    let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
+    envp.push(std::ptr::null());
+
+    let pty = openpty(None, None).expect("openpty");
+    let master_fd = pty.master.into_raw_fd();
+    let slave_fd = pty.slave.into_raw_fd();
+
+    let a = unsafe { libc::fork() };
+    assert!(a >= 0, "fork failed");
+    if a == 0 {
+        unsafe {
+            libc::close(master_fd);
+            libc::setsid();
+            libc::ioctl(slave_fd, libc::TIOCSCTTY, 0);
+            libc::dup2(slave_fd, 0);
+            libc::dup2(slave_fd, 1);
+            libc::dup2(slave_fd, 2);
+            libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            let apg = libc::getpgrp();
+            let b = libc::fork();
+            if b == 0 {
+                libc::setpgid(0, 0);
+                libc::execvpe(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
+                libc::_exit(127);
+            }
+            libc::tcsetpgrp(0, b); // cprog foreground -> managed
+            let nap = |ms: i64| {
+                let ts = libc::timespec { tv_sec: 0, tv_nsec: ms * 1_000_000 };
+                libc::nanosleep(&ts, std::ptr::null_mut());
+            };
+            let mut st = 0;
+            nap(800); // footer up
+            libc::kill(b, libc::SIGTSTP);
+            libc::waitpid(b, &mut st, libc::WUNTRACED);
+            libc::tcsetpgrp(0, apg); // `bg`: cprog resumes suppressed
+            libc::kill(b, libc::SIGCONT);
+            nap(400); // long enough that a wrongly-unsuppressed footer would have drawn
+            libc::kill(b, libc::SIGTSTP); // second Ctrl-Z, taken by the still-installed flag
+            libc::waitpid(b, &mut st, libc::WUNTRACED);
+            libc::tcsetpgrp(0, b); // `fg`: cprog is the foreground group again
+            libc::kill(b, libc::SIGCONT);
+            nap(800); // the resumed render loop re-checks the foreground and redraws
+            libc::kill(-b, libc::SIGKILL);
+            libc::_exit(0);
+        }
+    }
+
+    unsafe { libc::close(slave_fd) };
+    let _feeder = Feeder::start(fifo.clone());
+    let mut master = unsafe { File::from_raw_fd(master_fd) };
+    let mut out = Vec::new();
+    drain(&mut master, master_fd, &mut out, Instant::now() + Duration::from_millis(4500), None);
+    unsafe { libc::kill(-a, libc::SIGKILL) };
+    let mut s = 0;
+    unsafe { libc::waitpid(a, &mut s, 0) };
+
+    // Scenario exercised: the footer engaged, and the first suspend restored the cursor.
+    assert!(contains(&out, b"\x1b[?25l"), "footer never engaged; scenario not exercised");
+    let last_show = rfind(&out, b"\x1b[?25h").expect("suspend should have shown the cursor");
+    // The inverse of the background test above: after the last cursor-show (the background
+    // resume draws nothing, so it comes from a suspend restore), the second Ctrl-Z + `fg` cycle
+    // must bring the footer back — a cursor-hide has to follow.
+    assert!(
+        contains(&out[last_show..], b"\x1b[?25l"),
+        "footer must come back after a second Ctrl-Z followed by fg (suppression is per-resume, not permanent)"
+    );
+}

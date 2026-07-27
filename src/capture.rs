@@ -5,7 +5,7 @@
 //! thread over a bounded channel; the main thread relays them to the terminal. The bound is what
 //! keeps the pipe's backpressure intact — with an unbounded queue a terminal slower than `cp`'s
 //! output would just accumulate un-rendered log bytes in memory (docs/architecture.md "동시성"). The stdout reader also
-//! feeds line boundaries to the slow-file timer (docs/verbose) — the `-v` content itself is
+//! feeds line boundaries to the slow-file timer ([`crate::verbose`]) — the `-v` content itself is
 //! never parsed. Both relays are immediate: bytes are forwarded as read, never held waiting
 //! for a newline, so the live scroll stays live (docs/testing.md B9).
 

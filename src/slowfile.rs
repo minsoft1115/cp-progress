@@ -1,6 +1,6 @@
 //! Slow-file decision (docs/capture-and-verbose.md "느린 파일 타이밍").
 //!
-//! Timing rule, driven purely by line-boundary pulses (docs/verbose):
+//! Timing rule, driven purely by line-boundary pulses ([`crate::verbose`]):
 //! ```text
 //! new -v line (pulse)      -> record "current item start" time (ends the previous item)
 //! next pulse / cp exit      -> previous item ends

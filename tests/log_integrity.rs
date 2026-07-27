@@ -1,5 +1,5 @@
 #![cfg(feature = "integration")]
-//! Log-integrity integration test (#4, docs/ui.md invariant 10).
+//! Log-integrity integration test (#4, docs/ui.md invariant 11).
 //!
 //! `cp` writes one error line as several `write(2)` calls (glibc's `error()` emits the `"cp: "`
 //! prefix, the message, the reason and the newline separately). The relay forwards each fragment

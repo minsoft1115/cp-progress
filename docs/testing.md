@@ -29,8 +29,7 @@
   생략), rate/eta 텍스트 폭이 바뀌어도 흔들리지 않음.
 - **파일명 줄** — 제어문자 제거 → 표시폭 기준 앞자름 → `…`/`...` 폴백. 폭 경계값, CJK(2칸),
   개행이 든 경로, 이름이 폭보다 짧을 때(자르지 않음)까지 단언한다.
-- **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다. (파일명은 footer에 안 넣으므로 이전의
-  name sanitize/truncate 항목은 폐기.)
+- **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다.
 - **render/footer** — `FooterGuard`가 `Drop`에서 지움(정상 + `catch_unwind` panic);
   footer가 `height − min_log_rows`를 안 넘음.
 - **messages/exit** — 요약/경고 포맷, `ExitDisposition` 매핑, 시그널 vs `128+n` 정책.
@@ -83,8 +82,9 @@
 - **기본 `cargo test`는 외부 도구 없이 완전 green** — 유닛 스위트만 돈다(‑ `cp`/`stdbuf`/PTY
   불요). 커널 `/proc`·임시파일만 쓰는 self-pid 테스트는 유닛에 포함된다.
 - **통합 테스트는 `cargo test --features integration`** — 진짜 `cp`/`stdbuf` + PTY를 쓰는
-  `tests/*.rs`(passthrough·managed·signals·fallback)는 `integration` feature로 게이트돼, 기본
-  스위트의 순수성을 지킨다.
+  `tests/*.rs` 전체(passthrough·managed·signals·fallback·background·suspend·resize·quiet·
+  log_integrity)가 `integration` feature로 게이트돼, 기본 스위트의 순수성을 지킨다. 외부
+  도구가 필요 없는 `tests/exit_contract.rs`만 기본 스위트에 남는다.
 - 동작을 최대한 순수 유닛으로 **끌어내려** 통합 테스트를 적고 안정적으로.
 - **`cp` 결과 보존**을 테스트로 못박음: relay/footer IO 실패가 exit code를 바꾸지 않음.
 - fault-injection 전용 feature는 두지 않는다. 주입 seam 없이도 실패 경로를 유닛에서 덮을 수 있고,
@@ -147,11 +147,11 @@
 | D1 | `cp` 중간 실패(권한/ENOSPC) | 에러 relay, footer 정리, exit code 보존 | 통합 + exit 유닛 |
 | D2 | `cp` 시그널 종료 | 시그널 보존, 요약 없음, footer 정리 | 통합 + exit 유닛 |
 | D3 | `cprog`가 직접 시그널(Ctrl-C) 받음 | footer 정리 + 같은 시그널 재현 | 통합 |
-| D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛/통합 |
+| D4 | `cp` spawn 실패(PATH 없음) | `Fatal::CpSpawn` | 유닛 + 실바이너리(`tests/exit_contract.rs` — 빈 PATH라 외부 도구 불요, 기본 스위트) |
 | D5 | 인자 없음 | `Fatal::Usage`, exit 1 | 유닛 |
-| D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_line`) + 통합(PTY/비-TTY 양쪽) |
+| D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_notice`) + 통합(PTY/비-TTY 양쪽) |
 | D6 | `cp` 정상 exit code n | 그대로 n 반환 | 유닛 + 통합 |
-| D7 | `stdbuf`가 `cp`를 exec | PID 안정 → `/proc/<pid>/fd` 유효 | 통합 |
+| D7 | `stdbuf`가 `cp`를 exec | PID 안정 → `/proc/<pid>/fd` 유효 | 통합(간접 — managed 테스트에서 footer가 뜨는 것 자체가 증거) |
 
 ## E. passthrough 순수성
 

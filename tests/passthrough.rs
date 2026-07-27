@@ -95,6 +95,21 @@ fn passthrough_output_is_byte_identical_to_cp() {
 }
 
 #[test]
+fn scan_error_falls_back_to_passthrough_byte_identical() {
+    // docs/runtime-model.md "인자 검사 자체가 실패해도 보수적으로 passthrough" / exceptions B13.
+    // `--suffix` without a value fails cprog's own scan; the args must still reach cp untouched,
+    // which prints its own diagnosis — same exit code, byte-identical output. This is the only
+    // test exercising the Scan -> passthrough wiring in dispatch (the args unit tests stop at
+    // inspect returning the error).
+    let ours = cprog(["--suffix"]);
+    let theirs = cp(["--suffix"]);
+    assert_ne!(ours.status.code(), Some(0), "cp itself rejects the lone --suffix");
+    assert_eq!(ours.status.code(), theirs.status.code(), "same exit code as cp");
+    assert_eq!(ours.stdout, theirs.stdout, "stdout byte-identical");
+    assert_eq!(ours.stderr, theirs.stderr, "cp's own diagnosis, not a cprog error");
+}
+
+#[test]
 fn informational_output_stays_byte_identical_when_not_a_terminal() {
     // #15: cprog names itself after `--help`/`--version`, but only on a terminal. With output
     // captured — a pipe, a redirect, any script — both streams must still match `cp` exactly,
