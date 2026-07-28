@@ -178,7 +178,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | G5 | **번들 단축 옵션**(`-ai`, `-av`) | 각각 분해해 감지 | ✅ `args.rs::bundled_short_interactive` |
 | G6 | **operand 뒤에 오는 옵션**(`cp src -i dst`) | `cp`처럼 permute 처리 | ✅ `args.rs::permuted_interactive_after_operand` |
 | G7 | **그 외 cp 옵션**(`--sparse=`, `--reflink=`, `--preserve=`, `--backup=`) | 인식하지 않고 그대로 통과. 이들은 값을 `=`로 붙이거나 선택적 값이라 `-i`/`-v` 오인 위험이 없다. **값 필수인 단축 옵션은 `-S`/`-t`뿐**이라 G3으로 충분 | 📄 |
-| G8 | **비-UTF-8 인자** | `OsString`으로 다뤄 그대로 `cp`에 전달한다 — 스캔은 인자 벡터를 **재구성하지 않는다**. 플래그 검출도 정상 동작한다(벡터에 표현 불가한 바이트가 있다고 스캔을 포기하면 조용히 passthrough로 떨어진다). `cp` 자신은 그 바이트를 `$'\377'`로 이스케이프해 출력하므로, 계약은 "raw 바이트가 보인다"가 아니라 **`cp`와 바이트 동일** | ✅ `tests/passthrough.rs::a_non_utf8_argument_reaches_cp_unchanged`, `a_non_utf8_argument_does_not_break_the_flag_scan` (#47) |
+| G8 | **비-UTF-8 인자** | `OsString`으로 다뤄 그대로 `cp`에 전달한다 — 스캔은 인자 벡터를 **재구성하지 않는다**. 플래그 검출도 정상 동작한다(벡터에 표현 불가한 바이트가 있다고 스캔을 포기하면 조용히 passthrough로 떨어진다). `cp` 자신은 그 바이트를 `$'\377'`로 이스케이프해 출력하므로, 계약은 "raw 바이트가 보인다"가 아니라 **`cp`와 바이트 동일** | ✅ `args.rs::a_non_utf8_operand_does_not_stop_the_scan`(스캔 규칙), `tests/passthrough.rs::a_non_utf8_argument_reaches_cp_unchanged`·`a_non_utf8_name_in_a_verbose_line_matches_cp_exactly`(cp와 바이트 동일) (#47) |
 
 ---
 

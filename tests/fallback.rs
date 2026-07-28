@@ -131,13 +131,14 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
 
     assert_eq!(status.code(), Some(127), "cprog returns the child's 127 verbatim");
     let text = String::from_utf8_lossy(&out);
-    // stdbuf's own message is relayed, so the user is told what is actually wrong. A cprog-shaped
-    // error here would be worse: it would name the wrapper for a failure that is not the
-    // wrapper's.
-    assert!(
-        text.contains("stdbuf") || text.contains("cp"),
-        "the child's diagnosis must reach the screen: {text:?}"
-    );
+    // stdbuf's own message is relayed, so the user is told what is actually wrong:
+    //   stdbuf: failed to run command 'cp': No such file or directory
+    // Matching on "stdbuf" specifically, not a loose "cp" — "cprog" contains "cp", so the loose
+    // form would also accept the very failure the next assertion rules out.
+    assert!(text.contains("stdbuf"), "the child's own diagnosis must reach the screen: {text:?}");
+    // And the failure this distinguishes it from: had managed mode not engaged, cprog would have
+    // exec'd `cp`, failed, and reported Fatal::CpSpawn — also exit 127, but naming the wrapper
+    // for a failure that is not the wrapper's (C1). The exit code alone cannot tell them apart.
     assert!(!text.contains("cprog:"), "cprog must not invent a Fatal of its own: {text:?}");
     assert!(!dst.exists(), "nothing was copied");
 }

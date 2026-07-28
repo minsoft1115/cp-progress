@@ -243,9 +243,14 @@ fn a_non_utf8_argument_reaches_cp_unchanged() {
 }
 
 #[test]
-fn a_non_utf8_argument_does_not_break_the_flag_scan() {
-    // The scan must still see `-v` and `-i` with an unrepresentable operand in the vector —
-    // a scan that gave up on the whole vector would drop to passthrough silently (B13/B13a).
+fn a_non_utf8_name_in_a_verbose_line_matches_cp_exactly() {
+    // exceptions G8, the `-v` shape: the name has to survive as bytes all the way into cp's own
+    // output line.
+    //
+    // Deliberately *not* named after the flag scan. Stdout is not a terminal here, so managed
+    // and passthrough are indistinguishable from the outside and this would pass whether or not
+    // the scan saw `-v` at all — verified by mutation. That claim is asserted where it is
+    // actually observable: `args.rs::a_non_utf8_operand_does_not_stop_the_scan`.
     use std::os::unix::ffi::OsStrExt;
 
     let tmp = TmpDir::new("nonutf8flags");
