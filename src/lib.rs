@@ -185,12 +185,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     // says it, so the row stays blank and acts as a separator instead (#20).
     let show_name = !verbose_present;
     let style = term::detect_style();
-    let threshold = env_ms(
-        "CPROG_SLOW_THRESHOLD_MS",
-        slowfile::DEFAULT_SLOW_THRESHOLD.as_millis() as u64,
-    );
-    let sample_interval = env_ms("CPROG_SAMPLE_INTERVAL_MS", 100);
-    let render_tick = env_ms("CPROG_RENDER_TICK_MS", 125);
+    let Knobs { threshold, sample_interval, render_tick } = knobs(|var| std::env::var(var).ok());
 
     let slow = Arc::new(Mutex::new(SlowTimer::new(threshold)));
     let progress: Arc<Mutex<Option<ProgressState>>> = Arc::new(Mutex::new(None));
@@ -428,13 +423,42 @@ pub(crate) fn lock_shared<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// roughly half a megabyte (docs/architecture.md "동시성").
 const RELAY_QUEUE_DEPTH: usize = 64;
 
-/// Read a millisecond duration from an env var, falling back to `default_ms`.
-fn env_ms(var: &str, default_ms: u64) -> Duration {
-    ms_or_default(std::env::var(var).ok().as_deref(), default_ms)
+/// Default `stat` polling interval while a file is slow (docs/usage.md `CPROG_SAMPLE_INTERVAL_MS`).
+const DEFAULT_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
+/// Default footer redraw tick (docs/usage.md `CPROG_RENDER_TICK_MS`).
+const DEFAULT_RENDER_TICK: Duration = Duration::from_millis(125);
+
+/// The three timing knobs, resolved once before the render loop starts.
+struct Knobs {
+    /// How long one file must take before its bar appears.
+    threshold: Duration,
+    /// `stat` polling interval while a file is slow.
+    sample_interval: Duration,
+    /// Footer redraw tick.
+    render_tick: Duration,
 }
 
-/// The rule behind [`env_ms`], split out so it can be tested without touching the environment
-/// (`std::env::set_var` is `unsafe` in edition 2024 and would race the other tests anyway).
+/// Resolve the timing knobs, asking `lookup` for each variable (`None` when it is unset).
+///
+/// The environment read is a parameter rather than a `std::env::var` call inside, so two rules
+/// that only exist in this wiring can be stated: that each variable feeds the knob it names, and
+/// that an unset one falls back to the value docs/usage.md publishes. `std::env::set_var` is
+/// `unsafe` in edition 2024 and would race the rest of the suite, so a seam is the only way to
+/// reach them (exceptions H1, #55). What stays untestable is the one line below that supplies the
+/// real environment — deliberately kept to exactly that, a closure with nothing else in it.
+fn knobs(lookup: impl Fn(&str) -> Option<String>) -> Knobs {
+    let ms = |var: &str, default: Duration| {
+        ms_or_default(lookup(var).as_deref(), default.as_millis() as u64)
+    };
+    Knobs {
+        threshold: ms("CPROG_SLOW_THRESHOLD_MS", slowfile::DEFAULT_SLOW_THRESHOLD),
+        sample_interval: ms("CPROG_SAMPLE_INTERVAL_MS", DEFAULT_SAMPLE_INTERVAL),
+        render_tick: ms("CPROG_RENDER_TICK_MS", DEFAULT_RENDER_TICK),
+    }
+}
+
+/// The parse rule behind [`knobs`], split out so it can be exercised on its own — one raw string
+/// at a time, without a lookup or an environment in the way.
 ///
 /// Anything that is not a plain non-negative integer — a typo, a unit suffix, a negative, an
 /// empty value — falls back to the default **silently** (docs/exceptions.md H1). Warning would
@@ -462,6 +486,35 @@ fn restore_default_suspend() {
 #[cfg(test)]
 mod env_knobs {
     use super::*;
+
+    #[test]
+    fn unset_knobs_are_the_values_the_docs_promise() {
+        // #55. `ms_or_default` was well covered, but always against a default the test itself
+        // chose (125), so the three real ones were held only by the wiring above it — and
+        // replacing that wiring with `Duration::default()`, zeroing every knob, passed the whole
+        // suite. A zero threshold puts a bar on every file and a zero tick spins the render loop,
+        // so these are the numbers, from docs/usage.md and README.
+        let k = knobs(|_| None);
+        assert_eq!(k.threshold, Duration::from_millis(100), "CPROG_SLOW_THRESHOLD_MS");
+        assert_eq!(k.sample_interval, Duration::from_millis(100), "CPROG_SAMPLE_INTERVAL_MS");
+        assert_eq!(k.render_tick, Duration::from_millis(125), "CPROG_RENDER_TICK_MS");
+    }
+
+    #[test]
+    fn each_knob_reads_the_variable_that_names_it() {
+        // Distinct values, because two of the three share a default: were the threshold and the
+        // sample interval read from the same variable, nothing above would notice. The panic arm
+        // additionally pins that no *other* variable is consulted.
+        let k = knobs(|var| match var {
+            "CPROG_SLOW_THRESHOLD_MS" => Some("11".to_string()),
+            "CPROG_SAMPLE_INTERVAL_MS" => Some("22".to_string()),
+            "CPROG_RENDER_TICK_MS" => Some("33".to_string()),
+            other => panic!("knobs read an unexpected variable: {other}"),
+        });
+        assert_eq!(k.threshold, Duration::from_millis(11));
+        assert_eq!(k.sample_interval, Duration::from_millis(22));
+        assert_eq!(k.render_tick, Duration::from_millis(33));
+    }
 
     /// H1: anything that is not a plain non-negative integer falls back, and does so silently.
     /// The knobs are undocumented-ish timing controls, so a typo must not change behaviour in a

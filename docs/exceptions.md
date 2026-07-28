@@ -196,7 +196,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
-| H1 | **`CPROG_*_MS`가 숫자가 아님** | 에러 없이 **조용히 기본값**으로 폴백한다(빈 값·단위 접미사·음수·소수·공백·16진수·`u64` 초과 전부). 조용한 이유: 경고는 곧 `cp`가 안 냈을 줄을 cprog가 내는 것이고, 결과는 타이밍 손잡이가 문서화된 기본값으로 돌아가는 것뿐이라 사용자가 조치할 게 없다 | ✅ `lib.rs::env_knobs` (#47) |
+| H1 | **`CPROG_*_MS`가 숫자가 아님 — 또는 미설정** | 에러 없이 **조용히 기본값**으로 폴백한다(빈 값·단위 접미사·음수·소수·공백·16진수·`u64` 초과 전부, 그리고 변수가 아예 없는 경우도 같은 규칙). 조용한 이유: 경고는 곧 `cp`가 안 냈을 줄을 cprog가 내는 것이고, 결과는 타이밍 손잡이가 문서화된 기본값으로 돌아가는 것뿐이라 사용자가 조치할 게 없다. **그 "문서화된 기본값"이 실제로 무엇인지도 규칙이다** — 100 / 100 / 125([usage.md](./usage.md) 환경 변수 표)이고, **변수마다 자기 이름의 knob에만 꽂힌다**(둘이 기본값을 공유하므로 뒤바뀌어도 값만 봐서는 티가 안 난다) | ✅ 파싱 규칙은 `lib.rs::env_knobs`(#47), 기본값과 변수↔knob 배선은 `lib.rs::unset_knobs_are_the_values_the_docs_promise`·`each_knob_reads_the_variable_that_names_it` (#55) |
 | H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 에러가 아니라 유효한 설정이다. `>`가 배타적이라 **펄스 순간 자체는 아직 느리지 않고** 그 이후가 전부 느림 → 거의 항상 footer가 뜬다. "펄스 전에는 안 뜬다"는 가드가 임계보다 우선이라 `cp`가 파일 이름을 대기도 전에 바가 뜨는 일은 없다 | ✅ `slowfile.rs::a_zero_threshold_makes_everything_slow_from_the_first_instant_after_a_pulse`, `a_zero_threshold_still_reports_nothing_before_the_first_pulse` (#47) |
 | H3 | **managed의 env 변경 범위** | `QUOTING_STYLE=shell-escape` **하나뿐**. `LC_ALL=C`는 일부러 안 건다 — `-v`를 파싱하지 않으니 이득이 없고, C 로케일은 한글 등 비-ASCII 파일명을 옥타 이스케이프로 깨뜨린다 | ✅ `process.rs::managed_sets_only_quoting_style_not_locale` |
 | H4 | **passthrough의 env** | **전혀 건드리지 않음** → cp의 에러 메시지 로케일까지 바이트 동일 | ✅ `process.rs::passthrough_never_touches_env` |
