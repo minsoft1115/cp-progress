@@ -5,8 +5,8 @@
 `cp`와 바이트 동일**하게 동작한다. 진짜 `cp`를 그대로 실행하고, `cp -v` 출력을 평소처럼
 위로 흘려주며, **오래 걸리는 파일에 대해서만** 하단 footer에 진행바를 그렸다가 끝나면 없앤다.
 
-자체 진행률 계산 엔진도, 외부 `progress` 명령도, hidden PTY도 없다. 이 문서는
-**docs-first**로 작성됐다 — 코드보다 설계를 먼저 확정해, 이후 test-first로 구현한다.
+자체 진행률 계산 엔진도, 외부 `progress` 명령도, hidden PTY도 없다. 이 `docs/`가
+확정 스펙이다 — **docs-first**로 설계를 먼저 확정하고, test-first로 구현한다.
 
 ## 문서 목록
 
@@ -24,7 +24,7 @@
 - [`testing.md`](./testing.md) — test-first(TDD) 전략
 - [`performance.md`](./performance.md) — 오버헤드 실측 기준선과 재는 방법(‑ 회귀 비교용)
 - [`exceptions.md`](./exceptions.md) — 예외 상황 카탈로그(시그널·Ctrl-Z·passthrough 강제·
-  진행 계산 한계) + 미커버 갭과 권고
+  진행 계산 한계)와 각각의 현재 동작·테스트 위치
 - [`usage.md`](./usage.md) — 사용법과 동작
 
 ## 한 문단 요약

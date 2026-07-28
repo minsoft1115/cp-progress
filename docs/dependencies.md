@@ -7,7 +7,7 @@
 - **리눅스를 대상**으로 구현(‑ 진행바는 `/proc` 기반, 그 외 플랫폼은 passthrough로 강등)하므로
   크로스플랫폼 터미널 추상화는 불필요.
 
-버전은 목표 major만 적는다. 확정 시 `cargo add`로 최신 patch·유지보수 상태를 확인한다.
+버전은 목표 major만 적는다 — 실제 핀은 `Cargo.toml`/`Cargo.lock`이 든다.
 
 ## 런타임 필수 (core)
 
