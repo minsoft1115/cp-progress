@@ -117,5 +117,6 @@ cp --version 2>/dev/null     # 스크립트: 조용
 
 - 정상: `cp`의 exit code 그대로 반환.
 - 시그널(Ctrl-C 등): `cprog`에 같은 시그널을 다시 걸어 부모 셸이 올바른 `$?`/signaled 상태를
-  보게 함(SIGINT/TERM/HUP/QUIT), 불가하면 `128 + n`.
+  보게 함(SIGINT/TERM/HUP/QUIT), 불가하면 `128 + n`(폴백이 닿는 범위는
+  [exceptions A1a](./exceptions.md)).
 - `cprog` 쪽 문제(캡처·렌더·정리)는 **경고일 뿐**, `cp`가 낸 코드를 절대 바꾸지 않음.

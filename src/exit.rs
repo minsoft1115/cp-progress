@@ -1,11 +1,16 @@
 //! `ExitDisposition` -> signal-preserving finalize (docs/process-model.md).
 //!
 //! `cp`'s wait status is the final authority. A normal exit returns its code verbatim
-//! (docs/testing.md D6); a signal death is preserved so the parent shell sees a true
-//! signaled exit — cprog restores the default handler and re-raises the signal, and only if
-//! that is impossible falls back to the shell's `128 + signal` convention (docs/process-
-//! model.md D2). This module maps the status; the actual re-raise syscalls are wired with
-//! the process/orchestration layer.
+//! (docs/testing.md D6); a signal death is preserved so the parent shell sees a true signaled
+//! exit — cprog restores the default disposition and re-raises the signal (docs/process-model.md
+//! D2).
+//!
+//! The `128 + signal` fallback is narrower than it reads. For the standard signals the re-raise
+//! goes through [`signal_hook::low_level::emulate_default_handler`], which ends in `abort()` if
+//! its own raise ever returns — so a failure there dies of SIGABRT instead of reaching the
+//! fallback. What does reach it is the realtime range: the emulation does not know those signals,
+//! cprog raises them directly, and a raise can return if the signal is blocked in an inherited
+//! mask (docs/exceptions.md A1/A1a).
 
 use std::process::ExitStatus;
 
@@ -14,7 +19,8 @@ use std::process::ExitStatus;
 pub enum ExitDisposition {
     /// `cp` exited normally with this code — return it verbatim.
     Code(i32),
-    /// `cp` was killed by this signal — re-raise it (else fall back to `128 + signal`).
+    /// `cp` was killed by this signal — re-raise it. [`reraise`] says when the `128 + signal`
+    /// fallback is actually reachable.
     Signal(i32),
 }
 
@@ -38,8 +44,11 @@ pub fn disposition(status: ExitStatus) -> ExitDisposition {
 }
 
 /// Turn a disposition into cprog's exit: for a signal, re-raise it so the parent shell sees a
-/// true signaled exit; for a code, return it. Falls back to `128 + signal` only if the
-/// re-raise somehow fails to terminate the process.
+/// true signaled exit; for a code, return it.
+///
+/// [`reraise`] normally does not return; `128 + signal` is what a shell reports for a signal
+/// death anyway, so it is the right value when it does. See [`reraise`] for the one path that
+/// actually gets here.
 pub fn finalize(disp: ExitDisposition) -> i32 {
     if let ExitDisposition::Signal(sig) = disp {
         reraise(sig); // normally does not return (terminates the process)
@@ -47,17 +56,24 @@ pub fn finalize(disp: ExitDisposition) -> i32 {
     disp.code()
 }
 
-/// Restore the default handler for `signal`, unblock it, and re-raise it on ourselves so cprog
-/// exits with the same signaled status `cp` did (docs/process-model.md).
+/// Restore the default disposition for `signal`, unblock it, and re-raise it on ourselves so
+/// cprog exits with the same signaled status `cp` did (docs/process-model.md, exceptions A1/A1a).
 ///
-/// Best-effort: if nothing here terminates the process, `finalize` falls back to `128 + s`.
+/// `emulate_default_handler` is signal-hook's safe wrapper for exactly that sequence, and unlike
+/// a hand-rolled version it reports whether it worked. Two consequences are worth stating
+/// because neither is visible at the call site:
 ///
-/// `emulate_default_handler` is signal-hook's safe wrapper for exactly this sequence — restore
-/// the default disposition, unblock, raise — and unlike a hand-rolled version it reports whether
-/// each step worked. It looks the signal up in a table that stops at the standard set, so the
-/// realtime range comes back `EINVAL`; raising those directly is correct and complete here,
-/// because cprog installs handlers only for SIGINT/TERM/HUP/QUIT/WINCH/TSTP and anything outside
-/// that set still has its default disposition and is unblocked (docs/exceptions.md A1).
+/// * **It does not return on failure — it aborts.** Its standard-signal path ends in `abort()`
+///   if its own raise comes back, so a failed re-raise dies of SIGABRT rather than falling
+///   through to `128 + s`. Getting there needs `sigaction` to fail on a signal that came from
+///   `WTERMSIG`, which does not happen on Linux; a *blocked* signal is not enough, because the
+///   emulation unblocks first (measured: a blocked SIGTERM still terminates as SIGTERM).
+/// * **It does not know the realtime range**, which comes back `EINVAL`. Raising those directly
+///   is right: cprog installs handlers only for SIGINT/TERM/HUP/QUIT/WINCH/TSTP, so a signal
+///   arriving here is guaranteed to have its default disposition. The signal *mask*, though, is
+///   whatever was inherited — cprog never unblocks anything itself. If the parent blocked that
+///   signal the raise leaves it pending and returns, and `finalize`'s `128 + s` is what the
+///   caller sees. That is the only path that reaches it.
 fn reraise(signal: i32) {
     if signal_hook::low_level::emulate_default_handler(signal).is_err() {
         let _ = signal_hook::low_level::raise(signal);
