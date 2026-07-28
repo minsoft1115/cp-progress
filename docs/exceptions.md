@@ -74,7 +74,8 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B10 | **`tcgetpgrp`이 `ENOTTY`** (제어터미널 아님) | 백그라운드임을 **증명할 수 없으므로 관대하게 허용**(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 정상 감지됨 | 🟡 `term::is_foreground` |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
 | B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_but_names_cprog` |
-| B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄) | ✅ `args.rs::missing_required_value_is_scan_error`, 폴백 배선은 `tests/passthrough.rs::scan_error_falls_back_to_passthrough_byte_identical` |
+| B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄). 이 폴백은 **cp도 거부할 인자에만** 걸려야 한다 — B13a 참조 | ✅ `args.rs::missing_required_value_is_scan_error`, 폴백 배선은 `tests/passthrough.rs::scan_error_falls_back_to_passthrough_byte_identical` |
+| B13a | **`=값`이 붙은 long 옵션** (`--preserve=all`, `--reflink=auto`, `--sparse=`, `--backup=`, `--no-preserve=`, `--update=`, `--context=`) | **정상 managed.** cp가 받아들이는 인자이므로 B13의 폴백이 걸리면 안 된다. 스캔은 인식하지 못한 long 옵션의 attached value를 삼켜서 통과시킨다 — short에는 적용 불가(`-av`의 `optional_value()`가 번들 나머지 `v`를 값으로 먹어 `-v` 검출이 사라진다) | ✅ `args.rs::a_long_option_with_an_attached_value_does_not_fail_the_scan`, `tests/managed.rs::preserve_all_still_gets_the_managed_tui` (#30) |
 | B14 | **`sudo cprog` / setuid `cp`** | `stdbuf`는 `LD_PRELOAD` 기반이라 setuid 바이너리에선 무시됨. cp가 setuid인 극히 드문 환경에서는 라이브성이 degrade | 📄 `capture-and-verbose.md` |
 | B15 | **모드는 실행 전에 한 번만 결정** | 실행 중 파이프/TTY 상태가 바뀌어도 모드는 안 바뀐다(단순화). 유일한 런타임 재확인은 A10의 전경 여부 | 📄 `runtime-model.md` |
 | B16 | **`CPROG_PASSTHROUGH` 설정** (값 무관 — B6·F10과 같은 규칙, 빈 문자열 포함) | 무조건 passthrough. `--help`/`--version`의 cprog 버전 한 줄(B12/#15)까지 억제되고, passthrough는 exec라 화면에도 프로세스 목록에도 cprog의 흔적이 없다 | ✅ `plan.rs::forced_passthrough_wins_over_everything`, `tests/forced_passthrough.rs` |
@@ -107,7 +108,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | D5 | **사용자가 이미 `-v`를 줌** | 이중 주입 안 함(`-v` 하나만) | ✅ `process.rs::managed_does_not_double_inject_verbose` |
 | D6 | **stdout/stderr 인터리브 순서** | 파이프 둘을 각각 중계하므로 상대 순서가 순정 `cp`와 미세하게 다를 수 있음 | 📄 `capture-and-verbose.md` |
 | D7 | **relay 쓰기 실패**(EPIPE 등) | 무음 best-effort. exit code에 영향 없음 | ✅ `render.rs::io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs` |
-| D8 | **reader가 read 에러** | 루프 종료(EOF와 동일 취급) → 채널 닫힘 → 메인 루프도 정리 단계로 | 🟡 `capture::relay_stdout`/`relay_bytes` |
+| D8 | **reader가 read 에러** | 루프 종료(EOF와 동일 취급) → 채널 닫힘 → 메인 루프도 정리 단계로. **단 `EINTR`(`ErrorKind::Interrupted`)은 예외로 재시도한다** — 시그널에 끊긴 read는 스트림의 끝이 아니므로, EOF로 접으면 `cp`가 아직 낼 로그·에러가 화면에 닿지 못한다(D10과 같은 종류의 로그 유실). signal-hook이 기본으로 `SA_RESTART`를 걸어 실제로는 거의 안 일어나지만, 로그 무결성이 의존 크레이트의 기본값에 매달리지 않도록 명시한다 | ✅ `capture.rs::an_interrupted_read_does_not_end_the_relay` (#32) |
 | D9 | **대량 소파일로 `-v` 폭주** | 채널이 **경계 있는 `sync_channel`** 이라 큐가 차면 리더가 대기하고 → 파이프가 차고 → `cp`가 잠시 기다린다(백프레셔 복원). 렌더 루프는 tick마다 큐를 드레인해 한 번에 쓴다(‑ unbounded 큐라면 터미널이 느릴 때 못 그린 로그가 메모리에 쌓인다) | ✅ `capture.rs::a_full_queue_makes_the_relay_wait_rather_than_buffer` (#8) |
 | D10 | <a id="d10"></a>**footer가 떠 있는 동안 도착한 여러 조각짜리 메시지가 화면에서 유실** | 터미널에 **개행으로 끝나지 않은 줄이 남아 있는 동안 footer를 보류**하고, 다음 개행에서 다시 그린다 → 여러 조각으로 오는 `cp` 에러가 온전히 남는다(glibc `error()`는 한 줄을 write 4회로 내므로, 보류하지 않으면 개행을 품은 마지막 조각만 살아남는다) | ✅ `render::line_pending`, `tests/log_integrity.rs` (#4) |
 | D11 | **느린 파일이 끝난 뒤 footer가 잠시 낡은 값을 보여줌** | tick 결과를 `Sample`/`Skip`/`Idle` 셋으로 구분해, **잴 게 없으면(`Idle`) 바를 내리고** 읽기가 실패했을 때만(`Skip`) 마지막 값을 유지한다(‑ 뭉뚱그리면 끝난 파일의 바가 정지된 채 남는다) | ✅ `sampler.rs::finished_file_reports_idle_not_skip` (#7) |
@@ -135,6 +136,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E15 | **압축/inline 파일시스템**(btrfs `compress`, ZFS) 또는 `st_blocks`를 0으로 보고하는 FS | `st_blocks`를 아예 보지 않으므로 영향받지 않는다 | ✅ (#3, #12) — size만 보므로 영향 없음 |
 | E16 | **`total`과 `done`의 측정 기준 비대칭** | `total`(원본)과 `done`(대상) 모두 **`st_size`** 로 재므로 기준이 같아 비대칭이 없다 | ✅ (#3, #12) |
 | E17 | **상속된 fd가 대상으로 오인됨** | 쓰기 후보가 여럿이면 **틱 사이에 크기가 자라는 fd**를 고른다 → 셸이 물려준 fd(`3>/tmp/log`)는 자라지 않으므로 배제된다 | ✅ `sampler::choose_dest` (#6) |
+| E18 | **성장 비교용 크기 기록의 수명** | 이전 크기 기록은 **이번 틱의 후보만** 남긴다. 후보 수는 항상 한 자릿수(실제 대상 + 셸이 물려준 것 몇 개)이므로 기록도 그만큼으로 유계다. 복사한 파일 수에 비례해 쌓이면 "cprog의 메모리는 파일 개수와 무관"이라는 성질이 깨진다 — 후보가 계속 2개 이상이면 사이에 후보 없는 틱(E13)이 안 끼어 정리 기회가 없기 때문 | ✅ `sampler.rs::candidate_tracking_does_not_grow_with_the_number_of_files` (#33) |
 | E21 | **상속된 *읽기* fd가 원본으로 오인됨** | 원본을 **고른 대상 fd보다 작은 읽기 fd 중 가장 큰 것**으로 짝짓는다(`cp`는 원본을 열고 곧바로 대상을 연다) → 상속된 읽기 fd와 대상 이후에 열린 fd가 함께 배제된다 | ✅ `proc::source_for` (#11) |
 | E22 | **ext4 delayed allocation** (writeback 전 `blocks*512 < size`) | 측정 기준 판정 분기가 **없다** — 언제나 `st_size`로 재므로 지연 할당 상태와 무관하게 정확하다 | ✅ (#12) — 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
@@ -157,7 +159,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F8 | **렌더/IO 실패** | best-effort. exit code 불변 | ✅ `render.rs::io_failure_is_returned_and_drop_never_panics` |
 | F9 | **로그 바이트 도착** | footer 지움 → 로그 씀 → footer 재그림(erase-redraw) | ✅ `render.rs::write_log_erases_then_writes_then_redraws` |
 | F10 | **`NO_COLOR` 설정** | 값과 무관하게 색 끔 | ✅ `term::color_from` |
-| F11 | **비-UTF-8 로케일** | 블록 글리프 대신 ASCII 바(`[###---]`)로 폴백 | ✅ `term::unicode_from` |
+| F11 | **비-UTF-8 로케일** | 글리프를 쓰는 **모든 자리**가 함께 폴백한다: 바 `[###---]`, `⏳` 제거, 말줄임표 `...`, 종료 요약 `[ok]`/`[!]`, 버전 한 줄의 구분자 `-`. 하나라도 빠지면 "이 터미널은 UTF-8을 못 그린다"고 판정해놓고 UTF-8을 내보내는 셈이 된다. 버전 한 줄은 footer를 배치하지 않는 passthrough 경로라 특히 빠뜨리기 쉽다 | ✅ `term::unicode_from`, `ui.rs::the_ellipsis_follows_the_glyph_style`, `messages.rs::summary_glyphs_fall_back_to_ascii_without_unicode`, `messages.rs::the_version_notice_separator_falls_back_to_ascii_too`, 경로 전체는 `tests/managed.rs::a_c_locale_copy_emits_nothing_outside_ascii`·`the_version_notice_is_ascii_on_a_c_locale_terminal` (#31) |
 | F12 | **같은 터미널에 다른 프로세스가 씀** | sole-writer 전제가 깨져 footer가 깨질 수 있음. cprog가 제어할 수 없는 영역 | 📄 |
 | F13 | **아주 오래된 터미널이 `DECTCEM`(`?25l`)을 모름** | 커서 숨김/복원 시퀀스가 그대로 화면에 보일 수 있음. `TERM` 검사는 `dumb`만 거르고 terminfo는 쓰지 않음 | 📄 |
 | F14 | **파일명 렌더**(제어문자·폭 초과) | `-v` 없이 실행하면 footer 1행이 대상 경로를 표시한다: 제어문자를 제거한 뒤 표시폭 기준으로 앞에서 자른다. 폭 초과는 미관이 아니라 **정확성** 문제다 — 줄이 접히면 2행 지우기의 커서 이동이 어긋난다 | ✅ `ui::name_row`, `ui.md` 불변식 7 (#20) |

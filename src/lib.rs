@@ -109,7 +109,7 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
             let notice = version_notice(
                 informational && !term::passthrough_forced(),
                 io::stderr().is_terminal(),
-                term::detect_style().color,
+                term::detect_style(),
             );
             match notice {
                 Some(text) => {
@@ -263,17 +263,32 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         let mut batch: Vec<Vec<u8>> = Vec::new();
         let mut last_size_query = Instant::now();
         const SIZE_FALLBACK: Duration = Duration::from_secs(1);
+        // What to draw on this wake-up. Both arms of the receive below need exactly this, and a
+        // suppression rule living in two places is a rule that can be half-changed.
+        //
+        // `suppressed` is a parameter rather than a capture because the Ctrl-Z branch assigns to
+        // it while this closure is alive.
+        //
         // The terminal size is only ever used to lay out a footer, so it is refreshed only when
         // one is about to be drawn — on a SIGWINCH event or the low-frequency fallback. With
         // nothing to draw this skips an ioctl *and* a clock read per wake-up, which is the whole
         // of the per-file cost on a copy of many small files (#18). Leaving the SIGWINCH flag set
         // when we skip is deliberate: the first draw that needs it consumes it.
-        fn refresh_size(resized: &AtomicBool, size: &mut TerminalSize, last: &mut Instant) {
-            if term::should_requery_size(resized.swap(false, Ordering::Relaxed), last.elapsed(), SIZE_FALLBACK) {
-                *size = term::terminal_size(libc::STDOUT_FILENO).unwrap_or(*size);
-                *last = Instant::now();
+        let mut footer_this_tick = |suppressed: bool| -> Option<Footer> {
+            if suppressed || lock_shared(&progress).is_none() {
+                return None;
             }
-        }
+            let stale = term::should_requery_size(
+                resized.swap(false, Ordering::Relaxed),
+                last_size_query.elapsed(),
+                SIZE_FALLBACK,
+            );
+            if stale {
+                size = term::terminal_size(libc::STDOUT_FILENO).unwrap_or(size);
+                last_size_query = Instant::now();
+            }
+            footer_now(&progress, size, style, show_name)
+        };
         loop {
             // A caught terminating signal ends the render loop so cleanup can run.
             if received_signal.load(Ordering::Relaxed) != 0 {
@@ -316,23 +331,13 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                     while let Ok(more) = rx.try_recv() {
                         batch.push(more);
                     }
-                    let footer = if suppressed || lock_shared(&progress).is_none() {
-                        None
-                    } else {
-                        refresh_size(&resized, &mut size, &mut last_size_query);
-                        footer_now(&progress, size, style, show_name)
-                    };
+                    let footer = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
                     let rows = footer.as_ref().map(Footer::rows);
                     let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice), rows.as_ref().map(|r| &r[..]));
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let footer = if suppressed || lock_shared(&progress).is_none() {
-                        None
-                    } else {
-                        refresh_size(&resized, &mut size, &mut last_size_query);
-                        footer_now(&progress, size, style, show_name)
-                    };
+                    let footer = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
                     let _ = match footer {
                         // Withheld while an unterminated log line is on screen, so the periodic
@@ -384,7 +389,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         .wait()
         .map_err(|e| Fatal::CpWait { pid, source: e.to_string() })?;
     let disp = disposition(status);
-    if let Some(line) = summary(&disp, start.elapsed(), style.color, progress_shown) {
+    if let Some(line) = summary(&disp, start.elapsed(), style, progress_shown) {
         // Best-effort, same rationale as the Fatal path: never let a stderr write failure panic.
         let _ = writeln!(io::stderr(), "{line}");
     }
