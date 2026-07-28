@@ -405,10 +405,10 @@ mod name_row_tests {
     #[test]
     fn a_long_path_loses_its_front_not_its_tail() {
         // The tail is the part worth keeping — that is where the file name is.
-        let got = plain("/mnt/backup/2026/win11-vm/win11.qcow2", 22);
-        assert_eq!(got, "…/win11-vm/win11.qcow2");
-        assert_eq!(got.width(), 22, "fills the width exactly, never exceeds it");
-        assert!(got.ends_with("win11.qcow2"), "the file name survives: {got:?}");
+        let got = plain("/mnt/data/backup/archives/dataset.tar.zst", 26);
+        assert_eq!(got, "…/archives/dataset.tar.zst");
+        assert_eq!(got.width(), 26, "fills the width exactly, never exceeds it");
+        assert!(got.ends_with("dataset.tar.zst"), "the file name survives: {got:?}");
     }
 
     #[test]
