@@ -15,8 +15,8 @@ pub const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(1);
 
 /// Current-file percentage in `0..=100` from `done`/`total`, or `None` when the total is
 /// unknown (indeterminate). Empty source (total 0) reads as complete; overshoot clamps to
-/// 100. Shared by [`ProgressModel::percent`] and the footer renderer so the A5/A6 rules
-/// (docs/testing.md) live in exactly one place.
+/// 100. The footer renderer calls this, and so does `ProgressModel::percent` (test-only), so
+/// the A5/A6 rules (docs/testing.md) live in exactly one place.
 pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
     match total {
         None => None,
@@ -26,8 +26,8 @@ pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
 }
 
 /// Snapshot of the current file's progress, consumed by the footer renderer
-/// (docs/architecture.md "핵심 타입"). Carries raw `done`/`total`; percent is derived by the
-/// model (see [`ProgressModel::percent`]) so overshoot/empty-source handling stays in one place.
+/// (docs/architecture.md "핵심 타입"). Carries raw `done`/`total`; percent is derived with
+/// [`percent_of`] so overshoot/empty-source handling stays in one place.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressState {
     /// The destination path of the file being copied, shown on the footer's first row when the
