@@ -9,7 +9,6 @@ readme = "README.md"
 repository = "https://github.com/minsoft1115/cp-progress"
 keywords = ["cp", "progress", "cli", "coreutils", "terminal"]
 categories = ["command-line-utilities"]
-authors = ["Lee Minhyuk"]
 
 [[bin]]
 name = "cprog"
