@@ -94,8 +94,13 @@
   있다. 종료하지 않는 규칙(EINTR 재시도 vs 진짜 에러)은 실패 대신 **정지(hang)** 로 나타나며,
   그것도 검출로 친다(`cargo-mutants`가 timeout을 detection으로 세는 것과 같다).
 - 전수 확인은 `cargo mutants -j 3 -- --features integration`. 생존자는 셋 중 하나다:
-  **테스트 공백**(고친다) / **equivalent**(관측 차이 없음) / **도달 불가**(테스트를 지어내지 말고
-  [`exceptions.md`](./exceptions.md) F15에 📄로 근거를 남긴다). `mutants.out*`은 커밋하지 않는다.
+  **테스트 공백**(고친다) / **equivalent**(관측 차이 없음) / **도달 불가**(테스트를 지어내지 않는다).
+  뒤의 둘은 판정과 근거를 [`exceptions.md`](./exceptions.md) **F20 대장**에 📄로 남겨 다음 실행이
+  같은 판정을 다시 파생하지 않게 한다(방어값 자체의 도달 불가는 F16 옆 F15). `mutants.out*`은
+  커밋하지 않는다 — 1,400개가 넘는 untracked 파일이 `cargo publish --locked --dry-run`을 깨뜨린다.
+- **판정도 실측한다.** "equivalent라서 못 잡는다"는 주장 자체가 틀릴 수 있다 — 대장에 적기 전에
+  변이를 걸어 스위트를 돌려본다. 실제로 한 줄의 세 변이 중 하나만 생존하는데 줄 전체가 생존으로
+  기록돼 있던 적이 있고, 한 자리씩 봐야 할 것을 두 자리 함께 바꾸면 판정이 뒤집힌다.
 
 ---
 
