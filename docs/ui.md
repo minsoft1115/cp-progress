@@ -28,9 +28,9 @@ footer는 **항상 두 줄**이고, 느린 파일일 때만 나타난다.
 
 ```
 ┌ 터미널 ─────────────────────────────────────────────┐
-│ $ cp -r win11-vm /mnt/backup                         │  ← 로그 영역(조용함)
+│ $ cp -r archives /mnt/data/backup                    │  ← 로그 영역(조용함)
 │                                                      │
-│ …/win11-vm/win11.qcow2                               │  ← footer 1행: 대상 경로
+│ …/archives/dataset.tar.zst                           │  ← footer 1행: 대상 경로
 │  ████████████░░░░░░░░  62.33 %  0.9/1.4 GiB  ⏳ 00:05│  ← footer 2행: 진행바
 └──────────────────────────────────────────────────────┘
 ```
@@ -93,9 +93,9 @@ footer의 바 행(2행째)은 필드가 왼→오로 `bar · percent · size · 
 경로에서 의미 있는 부분은 **뒤쪽**이므로, 폭이 모자라면 앞을 버리고 말줄임표를 붙인다:
 
 ```
-/mnt/backup/2026/win11-vm/win11.qcow2
-                ↓ 폭이 모자라면
-…/win11-vm/win11.qcow2
+/mnt/data/backup/archives/dataset.tar.zst
+                  ↓ 폭이 모자라면
+…/archives/dataset.tar.zst
 ```
 
 - 말줄임표는 `…`(1칸), UTF-8이 아니면 `...`(3칸) — 바 글리프·`⏳`와 같은 `Style.unicode` 폴백.

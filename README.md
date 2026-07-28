@@ -17,7 +17,7 @@ if you asked for `-v`; otherwise cprog stays as quiet as `cp` and names the file
 instead. No external `progress` command, no hidden PTY, no screen-scraping.
 
 ```
-  …/backup/2026/win11-vm/win11.qcow2
+  …/backup/archives/dataset.tar.zst
   ████████████░░░░░░░░   62.33 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
 ```
 

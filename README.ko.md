@@ -16,7 +16,7 @@ CI·비-리눅스·백그라운드 작업 — 에서는 **투명하게 `cp`와 �
 이름을 footer에 보여준다. 외부 `progress` 명령도, hidden PTY도, 화면 스크래핑도 없다.
 
 ```
-  …/backup/2026/win11-vm/win11.qcow2
+  …/backup/archives/dataset.tar.zst
   ████████████░░░░░░░░   62.33 %  0.9/1.4 GiB  (142 MiB/s)  ⏳ 00:05
 ```
 
