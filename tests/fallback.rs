@@ -16,12 +16,17 @@ use nix::pty::{openpty, Winsize};
 mod common;
 use common::{read_retry, TmpDir};
 
+/// Locate a tool on the current PATH.
+fn find_on_path(tool: &str) -> PathBuf {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|d| d.join(tool))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| panic!("{tool} on PATH"))
+}
+
 /// Locate the real `cp` on the current PATH.
 fn find_cp() -> PathBuf {
-    std::env::split_paths(&std::env::var_os("PATH").unwrap())
-        .map(|d| d.join("cp"))
-        .find(|p| p.exists())
-        .expect("cp on PATH")
+    find_on_path("cp")
 }
 
 #[test]
@@ -73,4 +78,66 @@ fn missing_stdbuf_falls_back_to_passthrough() {
     // Passthrough: no footer bar (█) and no summary (✓) — cprog emits nothing of its own.
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]), "no bar in passthrough");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]), "no summary in passthrough");
+}
+
+#[test]
+fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
+    // exceptions C7, and the asymmetry is the point. With no `cp` at all the *spawn* fails and
+    // cprog reports Fatal::CpSpawn (C1, tests/exit_contract.rs). Here `stdbuf` is on PATH, so
+    // managed mode engages and the spawn **succeeds** — it is `stdbuf` that then cannot exec
+    // `cp`, prints its own diagnosis and exits 127. From cprog's side that is indistinguishable
+    // from "cp exited 127", and it must be reported as such: cp's result is the final authority,
+    // and cprog has no business inventing a Fatal for a child that started fine.
+    let tmp = TmpDir::new("nocp");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, b"payload").unwrap();
+
+    // A PATH with stdbuf but deliberately without cp.
+    let bindir = tmp.0.join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    std::os::unix::fs::symlink(find_on_path("stdbuf"), bindir.join("stdbuf")).unwrap();
+    assert!(!bindir.join("cp").exists(), "precondition: cp is not reachable");
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("PATH", &bindir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    let status = child.wait().unwrap();
+
+    assert_eq!(status.code(), Some(127), "cprog returns the child's 127 verbatim");
+    let text = String::from_utf8_lossy(&out);
+    // stdbuf's own message is relayed, so the user is told what is actually wrong. A cprog-shaped
+    // error here would be worse: it would name the wrapper for a failure that is not the
+    // wrapper's.
+    assert!(
+        text.contains("stdbuf") || text.contains("cp"),
+        "the child's diagnosis must reach the screen: {text:?}"
+    );
+    assert!(!text.contains("cprog:"), "cprog must not invent a Fatal of its own: {text:?}");
+    assert!(!dst.exists(), "nothing was copied");
 }
