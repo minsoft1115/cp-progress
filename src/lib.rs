@@ -284,7 +284,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 SIZE_FALLBACK,
             );
             if stale {
-                size = term::terminal_size(libc::STDOUT_FILENO).unwrap_or(size);
+                size = term::terminal_size(io::stdout()).unwrap_or(size);
                 last_size_query = Instant::now();
             }
             footer_now(&progress, size, style, show_name)
@@ -306,7 +306,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 // On resume, only take the terminal back over if we're the foreground process
                 // group again (Ctrl-Z then `fg`). If resumed in the background (Ctrl-Z then
                 // `bg`), suppress the footer so we don't take over the terminal (bug1/#1 seam).
-                suppressed = !term::is_foreground(libc::STDOUT_FILENO);
+                suppressed = !term::is_foreground(io::stdout());
                 resumed.store(true, Ordering::Relaxed); // drop rate history spanning the stop (#9)
                 resized.store(true, Ordering::Relaxed); // requery size + redraw if not suppressed
                 continue;
@@ -372,13 +372,17 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
     // the kill defensively — a stray signal to an exited pid is harmless.
     let received = received_signal.load(Ordering::Relaxed);
     if received != 0 && !matches!(child.try_wait(), Ok(Some(_))) {
-        // SAFETY: valid pid and signal; a race where cp already exited yields ESRCH, ignored.
-        unsafe {
-            libc::kill(pid as libc::pid_t, received);
+        // Both sends are best-effort: a race where cp already exited yields ESRCH. `received` is
+        // always one of the four signals registered above, so `from_named_raw` always resolves.
+        if let (Some(target), Some(sig)) = (
+            rustix::process::Pid::from_raw(pid as i32),
+            rustix::process::Signal::from_named_raw(received),
+        ) {
+            let _ = rustix::process::kill_process(target, sig);
             // A *stopped* cp acts on nothing: the signal above just sits pending, its pipes stay
             // open, and the joins below would never return. Continue it so it can actually take
             // the signal and die (#5). Harmless no-op when cp is already running.
-            libc::kill(pid as libc::pid_t, libc::SIGCONT);
+            let _ = rustix::process::kill_process(target, rustix::process::Signal::CONT);
         }
     }
     stop.store(true, Ordering::Relaxed);
