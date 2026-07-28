@@ -79,7 +79,9 @@ What the table says:
   patch currently targets rather than what your distro ships.
 - **`cpx` / `rsync`** — **not `cp`** at all (a from-scratch Rust reimplementation / a different
   tool), so behavior can differ — `cpx` covers part of cp's flag surface and parallelizes I/O;
-  `rsync`'s trailing-slash rule and attribute defaults are classic traps.
+  `rsync`'s trailing-slash rule (`src/` copies the contents, `src` the directory by name) and
+  its attribute defaults — even `-a` leaves out the ACLs (`-A`), xattrs (`-X`) and hardlinks
+  (`-H`) that `cp -a` preserves — are classic traps.
 - **cprog** — it's **just `cp` with a progress bar**: light install, always the current system
   cp, behavior unchanged. The only cost is that the bar is approximate.
 
