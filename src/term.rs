@@ -74,7 +74,14 @@ pub fn passthrough_forced() -> bool {
 pub fn is_foreground<F: AsFd>(fd: F) -> bool {
     match rustix::termios::tcgetpgrp(fd) {
         Ok(fg) => fg == rustix::process::getpgrp(),
-        // e.g. ENOTTY: not our controlling terminal -> can't tell -> allow
+        // A terminal with *no* foreground process group answers with pgid 0, which rustix
+        // reports as `OPNOTSUPP` rather than handing back a `Pid` that cannot exist. A pty
+        // master is the case that reaches this: nobody is in front of one, and drawing a footer
+        // into a master would deliver it as *input* on the slave. That is a definite "not the
+        // foreground", not an unanswerable question, so it is the one error that means no
+        // (docs/exceptions.md B10).
+        Err(rustix::io::Errno::OPNOTSUPP) => false,
+        // Anything else — ENOTTY above all — is "cannot tell", and cprog is lenient there.
         Err(_) => true,
     }
 }
