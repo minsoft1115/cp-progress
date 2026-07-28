@@ -61,10 +61,9 @@
 - **passthrough env 순수성:** managed가 쓰는 `QUOTING_STYLE=shell-escape`이 passthrough엔 안
   걸려, `cp`의 stdout·**에러 메시지(로케일 포함)** 까지 바이트 동일. (managed는 `LC_ALL=C`를
   걸지 않는다 — cprog는 `-v`를 파싱하지 않아 로케일 고정이 불필요하고, 비-ASCII 파일명을 보존한다.)
-- fault injection: "sampler/relay가 중간에 실패" 정리 경로. 한때 `test-hooks` cargo feature
-  슬롯을 두었으나, 그 사이 유닛 테스트가 같은 경로를 덮어(`dest_stat_error_skips_tick_and_keeps_model`,
-  `proc_error_skips_tick`, `io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs`)
-  쓰이지 않는 feature만 남아 **제거했다.**
+- fault injection("sampler/relay가 중간에 실패" 정리 경로)은 별도 feature 없이 유닛으로
+  덮는다: `dest_stat_error_skips_tick_and_keeps_model`, `proc_error_skips_tick`,
+  `io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs`.
 
 > **핵심:** fake cp는 flush를 제어하므로 실전 버퍼링을 못 잡는다. 최소 하나의 통합 테스트는
 > **진짜 `cp`** 로 스트리밍을 확인해야 한다.
@@ -134,8 +133,8 @@
 | C1 | 바 도중 리사이즈 | SIGWINCH → 재배치 | 유닛(flag) + 통합 |
 | C2 | SIGWINCH 유실/합쳐짐 | 폴백 주기로 재조회 | 유닛 |
 | C3 | 터미널이 footer보다 짧음(`height < min_log`) | footer 억제/최소, 로그 영역 보존 | 유닛(layout) |
-| C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여주므로 다시 유효(#20). 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
-| C5 | **파일명 제어문자/개행** | 같은 이유로 다시 유효(#20). **자르기 전에 제거** — 남기면 footer가 한 줄을 넘어 2행 지우기가 어긋남 | 유닛(개행·NUL·ESC 픽스처) |
+| C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여준다. 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
+| C5 | **파일명 제어문자/개행** | **자르기 전에 제거** — 남기면 footer가 한 줄을 넘어 2행 지우기가 어긋남 | 유닛(개행·NUL·ESC 픽스처) |
 | C6 | 렌더/IO 실패 | exit code 안 바뀜(best-effort) | 유닛 + 통합 |
 | C7 | 렌더 중 panic | `FooterGuard::Drop`이 화면 정리 | 유닛(catch_unwind) |
 | C8 | 로그 바이트 도착 | footer 지운 뒤 로그 쓰고 다시 그림 | 유닛 |
