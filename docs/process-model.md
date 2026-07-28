@@ -97,8 +97,10 @@
 ## 시그널 보존 종료
 
 - `cp` exit code `n` → `cprog`가 `n` 반환.
-- `cp`가 시그널 `s`로 죽음 → `cprog`가 기본 핸들러 복원, `s` unblock, 자신에게 `s` 재전송해
-  부모 셸이 진짜 signaled 종료를 보게 함. 불가하면 `128 + s`.
+- `cp`가 시그널 `s`로 죽음 → `cprog`가 기본 disposition 복원, `s` unblock, 자신에게 `s` 재전송해
+  부모 셸이 진짜 signaled 종료를 보게 함. 불가하면 `128 + s` — 단 이 폴백이 닿는 건 **실시간
+  시그널이 블록돼 있을 때뿐**이고, 표준 시그널의 재전송 실패는 SIGABRT로 끝난다
+  ([exceptions A1a](./exceptions.md)).
 - `cprog`가 **단독으로** 시그널 `s`를 받았고(그룹이 아니라 `kill <cprog>`) `cp`가 아직 살아있으면,
   `cprog`는 **그 `s`를 그대로 `cp`에 전달**한다(SIGTERM으로 정규화하지 않음). 그러면 `cp`가 `s`로
   죽고 위 규칙대로 `cprog`도 `s`로 재전송돼, 조작자가 보낸 시그널과 신고 시그널이 일치한다.
