@@ -157,6 +157,66 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
 }
 
 #[test]
+fn preserve_all_still_gets_the_managed_tui() {
+    // #30 / exceptions B13a. `--preserve=all` is an ordinary cp invocation, but its attached
+    // `=value` used to trip cprog's own argument scan, and the conservative Scan -> passthrough
+    // fallback (B13) then took the progress bar away with no diagnostic. The same shape covers
+    // --reflink=, --sparse=, --backup=, --no-preserve=, --update= and --context=.
+    //
+    // Asserting on the bar rather than the mode: `-v` is not passed, so the footer's own glyphs
+    // are the only thing that distinguishes managed from a passthrough that just ran cp.
+    let tmp = TmpDir::new("preserveall");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).expect("openpty");
+    let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
+    let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg("--preserve=all")
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err))
+        .spawn()
+        .expect("spawn cprog");
+    drop(pty.slave);
+
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    let status = child.wait().expect("wait cprog");
+
+    assert!(status.success(), "cprog exited non-zero");
+    assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "copy completed");
+    assert!(
+        out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]),
+        "expected footer bar glyphs: --preserve=all must not drop cprog to passthrough"
+    );
+    // Without `-v` the footer's first row is the only thing naming the file, so it must be there.
+    assert!(
+        String::from_utf8_lossy(&out).contains("dst.bin"),
+        "the footer's name row should still name the destination"
+    );
+}
+
+#[test]
 fn managed_relays_cp_error_and_preserves_exit_code() {
     // docs/testing.md D1: cp fails under managed mode -> cprog relays the error, and returns
     // cp's exit code with a ✗ summary (no footer residue).

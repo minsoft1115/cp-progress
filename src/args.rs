@@ -56,7 +56,20 @@ pub fn inspect(args: &[OsString]) -> Result<ArgInspection, ArgError> {
                     // Consume the option's value so it cannot be misread as a flag.
                     parser.value().map_err(|e| ArgError::Scan(e.to_string()))?;
                 }
-                // Any other option or operand: ignore; it passes through to cp unchanged.
+                // Any other long option: swallow an attached `=value` if it has one. lexopt
+                // reports an unconsumed attached value as an error on the *next* `next()`, which
+                // would become ArgError::Scan and drop a perfectly ordinary `cp` invocation —
+                // `--preserve=all`, `--reflink=auto`, `--sparse=…` — to passthrough, taking the
+                // progress bar with it (#30, exceptions B13a). `optional_value` takes only the
+                // attached value, never the following argument, so nothing else is consumed.
+                //
+                // Long only. Inside a short bundle `optional_value` returns the *rest of the
+                // bundle*, so doing this for shorts would read `-av` as `-a` with value "v" and
+                // lose the `-v`.
+                Long(_) => {
+                    let _ = parser.optional_value();
+                }
+                // Any short option or operand: ignore; it passes through to cp unchanged.
                 _ => {}
             },
         }
@@ -205,6 +218,35 @@ mod tests {
     fn double_dash_makes_following_dash_v_an_operand() {
         let i = inspect(&args(&["--", "-v", "a"])).unwrap();
         assert!(!i.verbose);
+    }
+
+    // ---- long options carrying an attached value (B13a, #30) -------------------------
+
+    #[test]
+    fn a_long_option_with_an_attached_value_does_not_fail_the_scan() {
+        // These are ordinary `cp` invocations, so the scan must pass and managed mode must
+        // survive. Failing here drops to passthrough and the progress bar silently disappears —
+        // and none of them is on the passthrough list README and usage.md publish.
+        for a in [
+            "--preserve=all",
+            "--no-preserve=mode",
+            "--reflink=auto",
+            "--sparse=always",
+            "--backup=numbered",
+            "--update=older",
+        ] {
+            let i = inspect(&args(&[a, "src", "dst"]))
+                .unwrap_or_else(|e| panic!("{a} must scan clean, got {e:?}"));
+            assert!(!i.interactive && !i.verbose && !i.informational, "{a} sets no flag");
+        }
+    }
+
+    #[test]
+    fn a_flag_after_an_attached_value_is_still_seen() {
+        // Consuming the attached value must not swallow what follows it.
+        assert!(inspect(&args(&["--preserve=all", "-v", "a", "b"])).unwrap().verbose);
+        assert!(inspect(&args(&["--sparse=always", "-i", "a", "b"])).unwrap().interactive);
+        assert!(inspect(&args(&["--reflink=auto", "--help"])).unwrap().informational);
     }
 
     // ---- scan failure -> conservative passthrough ------------------------------------
