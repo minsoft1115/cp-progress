@@ -156,6 +156,117 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
     );
 }
 
+/// Read a PTY master to EOF.
+fn drain_to_eof(master: &mut File) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    out
+}
+
+#[test]
+fn a_c_locale_copy_emits_nothing_outside_ascii() {
+    // #31 / exceptions F11, as one end-to-end guard rather than a rule per glyph. On LC_ALL=C
+    // every glyph position must fall back together — the bar, the eta hourglass, the name row's
+    // ellipsis and the exit summary's marker. With ASCII file names cp contributes nothing
+    // outside ASCII either, so a single byte above 127 anywhere in the stream is cprog's.
+    //
+    // Written as a byte-range assertion on purpose: a test naming today's glyphs would not catch
+    // tomorrow's.
+    let tmp = TmpDir::new("clocale");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    // The whole point is "any byte above 127 is cprog's", and the footer's name row prints the
+    // destination path. A non-ASCII TMPDIR would fail this test for a reason that has nothing to
+    // do with cprog, so skip rather than mislead.
+    if !dst.to_string_lossy().is_ascii() {
+        return;
+    }
+    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).expect("openpty");
+    let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
+    let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C") // not UTF-8 -> Style.unicode is false
+        .env("LANG", "C")
+        .env_remove("LC_CTYPE")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(slave_out))
+        .stderr(Stdio::from(slave_err))
+        .spawn()
+        .expect("spawn cprog");
+    drop(pty.slave);
+
+    let out = drain_to_eof(&mut File::from(pty.master));
+    assert!(child.wait().expect("wait cprog").success());
+
+    // The footer really did engage — otherwise this would pass by drawing nothing at all. The
+    // summary is gated on that, and `[ok]` is the ASCII marker, so it proves both at once.
+    // (Not matching on the bar's `[##`: the fill is wrapped in an SGR run, so `[` and `#` are
+    // never adjacent in the byte stream.)
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("[ok] done"), "expected an ASCII summary after a monitored copy");
+    assert!(text.contains(" % "), "expected a footer bar row");
+
+    let stray: Vec<u8> = out.iter().copied().filter(|b| *b > 127).collect();
+    assert!(
+        stray.is_empty(),
+        "{} non-ASCII byte(s) reached a C-locale terminal, first few: {:?}",
+        stray.len(),
+        &stray[..stray.len().min(12)]
+    );
+}
+
+#[test]
+fn the_version_notice_is_ascii_on_a_c_locale_terminal() {
+    // The passthrough half of the same rule, and the easier one to miss: `--help` lays out no
+    // footer, so nothing else on this path consults Style at all. The separator was an em dash
+    // unconditionally, which a C-locale terminal shows as three replacement characters.
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg("--help")
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .env_remove("LC_CTYPE")
+        .env_remove("CI")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+
+    let out = drain_to_eof(&mut File::from(pty.master));
+    assert_eq!(child.wait().unwrap().code(), Some(0));
+
+    let text = String::from_utf8_lossy(&out);
+    let line = text
+        .lines()
+        .find(|l| l.contains(&format!("cprog {}", env!("CARGO_PKG_VERSION"))))
+        .unwrap_or_else(|| panic!("cprog names itself on a terminal: {text:?}"));
+    assert!(line.is_ascii(), "the notice must stay ASCII on a C locale: {line:?}");
+}
+
 #[test]
 fn preserve_all_still_gets_the_managed_tui() {
     // #30 / exceptions B13a. `--preserve=all` is an ordinary cp invocation, but its attached
