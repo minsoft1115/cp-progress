@@ -229,6 +229,211 @@ mod tests {
     const HIDE: &[u8] = b"\x1b[?25l";
     const SHOW: &[u8] = b"\x1b[?25h";
 
+    /// A terminal of fixed height that scrolls, so the cursor arithmetic can be checked against
+    /// something with a bottom edge (docs/ui.md invariant 7, #35).
+    ///
+    /// [`SharedBuf`] records bytes; it has no rows, so a footer drawn on the last line — where
+    /// its own `\n` scrolls the screen — behaves exactly like one drawn in the middle. That is
+    /// the case where a miscounted `CSI A` eats a line of log, and it was untested.
+    ///
+    /// Only what `FooterGuard` emits is interpreted: `\r`, `\n`, `CSI K`, `CSI A`, and the cursor
+    /// show/hide pair (ignored — visibility does not move the cursor). `\n` moves down *without*
+    /// resetting the column, the stricter reading: a PTY with `ONLCR` would also return to column
+    /// 0, and `draw` writes its own `\r` so it is correct either way.
+    #[derive(Default)]
+    struct Screen {
+        rows: usize,
+        grid: Vec<Vec<u8>>,
+        /// Lines pushed off the top, oldest first — the scrollback a user could still page to.
+        scrolled_off: Vec<String>,
+        row: usize,
+        col: usize,
+    }
+
+    impl Screen {
+        fn new(rows: usize) -> Self {
+            Screen { rows, grid: vec![Vec::new(); rows], ..Default::default() }
+        }
+
+        fn line_feed(&mut self) {
+            if self.row + 1 < self.rows {
+                self.row += 1;
+            } else {
+                self.scrolled_off.push(text(&self.grid.remove(0)));
+                self.grid.push(Vec::new());
+            }
+        }
+
+        fn put(&mut self, b: u8) {
+            let line = &mut self.grid[self.row];
+            if self.col < line.len() {
+                line[self.col] = b;
+            } else {
+                line.resize(self.col, b' ');
+                line.push(b);
+            }
+            self.col += 1;
+        }
+
+        /// The visible rows, top to bottom.
+        fn visible(&self) -> Vec<String> {
+            self.grid.iter().map(|l| text(l)).collect()
+        }
+
+        /// Everything the user could still read: scrollback then the visible rows.
+        fn all_lines(&self) -> Vec<String> {
+            self.scrolled_off.iter().cloned().chain(self.visible()).collect()
+        }
+    }
+
+    fn text(line: &[u8]) -> String {
+        String::from_utf8_lossy(line).trim_end().to_string()
+    }
+
+    /// A clonable handle so a test can inspect the screen after the guard has been dropped.
+    #[derive(Clone)]
+    struct SharedScreen(Rc<RefCell<Screen>>);
+
+    impl SharedScreen {
+        fn new(rows: usize) -> Self {
+            SharedScreen(Rc::new(RefCell::new(Screen::new(rows))))
+        }
+    }
+
+    impl Write for SharedScreen {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let mut s = self.0.borrow_mut();
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'\r' => {
+                        s.col = 0;
+                        i += 1;
+                    }
+                    b'\n' => {
+                        s.line_feed();
+                        i += 1;
+                    }
+                    0x1b => {
+                        let rest = &bytes[i..];
+                        if rest.starts_with(b"\x1b[K") {
+                            let (row, col) = (s.row, s.col);
+                            s.grid[row].truncate(col);
+                            i += 3;
+                        } else if rest.starts_with(b"\x1b[A") {
+                            s.row = s.row.saturating_sub(1);
+                            i += 3;
+                        } else {
+                            // Cursor show/hide and anything else: skip to the final byte.
+                            i += 1;
+                            while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                    }
+                    b => {
+                        s.put(b);
+                        i += 1;
+                    }
+                }
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_footer_at_the_bottom_row_survives_the_scroll_it_causes() {
+        // #35 / docs/ui.md invariant 7. Once the footer reaches the last line, the `\n` between
+        // its two rows scrolls the screen — and the next erase still walks up exactly one row.
+        // Get that wrong and every following write lands a line off, silently eating log output.
+        //
+        // Six rows is the smallest terminal that gets a footer at all (MIN_LOG_ROWS 2 +
+        // FOOTER_ROWS 2) with room to actually reach the bottom.
+        let screen = SharedScreen::new(6);
+        let footer = ["NAME", "BAR"];
+        {
+            let mut g = FooterGuard::new(screen.clone());
+            for i in 0..6 {
+                g.write_log(format!("L{i}\n").as_bytes(), Some(&footer[..])).unwrap();
+            }
+
+            let s = screen.0.borrow();
+            assert_eq!(
+                s.visible(),
+                vec!["L2", "L3", "L4", "L5", "NAME", "BAR"],
+                "the footer holds the last two rows and the log keeps the ones above"
+            );
+            assert_eq!(s.scrolled_off, vec!["L0", "L1"], "only whole log lines scrolled off");
+        }
+
+        // Every log line is readable exactly once: none overwritten by a misplaced footer, none
+        // duplicated by a redraw landing on the wrong row.
+        let s = screen.0.borrow();
+        let lines = s.all_lines();
+        for i in 0..6 {
+            let want = format!("L{i}");
+            assert_eq!(
+                lines.iter().filter(|l| **l == want).count(),
+                1,
+                "{want} must appear exactly once in {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tick_redraw_at_the_bottom_row_does_not_scroll() {
+        // The commonest state at runtime: one big file, no new log bytes, the footer redrawn
+        // every render tick in place. At the bottom row that redraw must walk the cursor back up
+        // first — otherwise its own `\n` scrolls a log line away *per tick*, and the previous
+        // name row is left stranded above the new one.
+        let screen = SharedScreen::new(6);
+        let mut g = FooterGuard::new(screen.clone());
+        for i in 0..6 {
+            g.write_log(format!("L{i}\n").as_bytes(), Some(&["NAME", "BAR"][..])).unwrap();
+        }
+        let scrolled_before = screen.0.borrow().scrolled_off.len();
+
+        for tick in 0..3 {
+            g.draw(&[&format!("NAME{tick}"), &format!("BAR{tick}")]).unwrap();
+        }
+
+        let s = screen.0.borrow();
+        assert_eq!(
+            s.visible(),
+            vec!["L2", "L3", "L4", "L5", "NAME2", "BAR2"],
+            "three redraws replace the same two rows"
+        );
+        assert_eq!(
+            s.scrolled_off.len(),
+            scrolled_before,
+            "an in-place redraw must not scroll the log away"
+        );
+    }
+
+    #[test]
+    fn dropping_the_guard_at_the_bottom_row_clears_only_the_footer() {
+        // The same boundary on the teardown path: Drop erases two rows from the last line, and
+        // must not take the log line above the footer with it.
+        let screen = SharedScreen::new(6);
+        {
+            let mut g = FooterGuard::new(screen.clone());
+            for i in 0..6 {
+                g.write_log(format!("L{i}\n").as_bytes(), Some(&["NAME", "BAR"][..])).unwrap();
+            }
+        } // Drop erases the footer
+
+        let s = screen.0.borrow();
+        assert_eq!(
+            s.visible(),
+            vec!["L2", "L3", "L4", "L5", "", ""],
+            "footer gone, log intact"
+        );
+    }
+
     #[test]
     fn two_rows_are_drawn_top_down() {
         // Row one names the file, row two is the bar. The newline between them is what puts the
