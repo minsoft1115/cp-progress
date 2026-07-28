@@ -19,8 +19,8 @@ name = "cprog"
 path = "src/lib.rs"
 
 [dependencies]
-# Same-terminal fstat (st_dev/ino), ioctl(TIOCGWINSZ), signal (sigaction/self-raise),
-# prctl(PR_SET_PDEATHSIG). See docs/dependencies.md.
+# Restoring a signal disposition to its default (SIGPIPE around exec, SIGTSTP on teardown) —
+# the one thing no crate wraps safely. See docs/dependencies.md.
 libc = "0.2"
 # Minimal interactive/-v detection and value-consuming option handling in args.rs.
 lexopt = "0.3"
@@ -28,6 +28,9 @@ lexopt = "0.3"
 unicode-width = "0.2"
 # Async-signal-safe SIGWINCH flag registration (self-raise on exit stays on libc).
 signal-hook = "0.3"
+# Safe wrappers for the fd/termios/process syscalls cprog needs, so no variadic FFI is left
+# in the crate. See docs/dependencies.md.
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process", "termios"] }
 
 [dev-dependencies]
 # PTY-based integration harness (openpty) and waitpid. Runtime never uses PTY.
