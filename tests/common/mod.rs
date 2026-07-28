@@ -54,6 +54,11 @@ pub fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Strip ANSI CSI sequences so a footer line's visible width can be measured.
+///
+/// Deliberately not the same function as `ui.rs`'s unit-test helper of the same name — the crate
+/// boundary puts that one out of reach, and this one has a harder input. It reads raw PTY output,
+/// so it drops control characters too (`\r`, `\n`, cursor movement); the unit-test copy takes a
+/// single composed footer row where a control character would itself be the bug.
 pub fn strip_sgr(bytes: &[u8]) -> String {
     let s = String::from_utf8_lossy(bytes);
     let mut out = String::new();

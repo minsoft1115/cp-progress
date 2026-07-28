@@ -160,11 +160,8 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
             // the only thing naming the file, and it is truncated from the front — which needs a
             // front to drop (docs/ui.md "footer 1행 — 파일 이름").
             let name = dest.to_string_lossy().into_owned();
-            self.current = Some(CurrentModel {
-                dest: dest.clone(),
-                name,
-                model: ProgressModel::new(total, self.window),
-            });
+            self.current =
+                Some(CurrentModel { dest, name, model: ProgressModel::new(total, self.window) });
         }
 
         let cm = self.current.as_mut().expect("current set above");
