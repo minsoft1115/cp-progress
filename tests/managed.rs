@@ -181,6 +181,12 @@ fn a_c_locale_copy_emits_nothing_outside_ascii() {
     let tmp = TmpDir::new("clocale");
     let src = tmp.0.join("src.bin");
     let dst = tmp.0.join("dst.bin");
+    // The whole point is "any byte above 127 is cprog's", and the footer's name row prints the
+    // destination path. A non-ASCII TMPDIR would fail this test for a reason that has nothing to
+    // do with cprog, so skip rather than mislead.
+    if !dst.to_string_lossy().is_ascii() {
+        return;
+    }
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
