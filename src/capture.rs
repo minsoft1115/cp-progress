@@ -21,9 +21,9 @@ use crate::verbose::LinePulse;
 /// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
 /// relay channel.
 ///
-/// The pulse fires only for reads that *completed* a line. A read that lands mid-line is not a
-/// new item, and treating it as one would restart the slow-file clock on the very files the
-/// footer exists for (exceptions D3).
+/// The pulse fires only for reads that *completed* a line: one completed line is one new item.
+/// A read landing mid-line is not an item, and counting it as one would start that item's clock
+/// at a fragment rather than at the line naming the file (exceptions D3).
 ///
 /// `-v` is injected either way, because the slow-file timer has nothing else to go on. But the
 /// bytes only reach the terminal when they were requested: cprog otherwise floods the scrollback
@@ -109,11 +109,11 @@ mod tests {
 
     #[test]
     fn a_chunk_without_a_line_boundary_does_not_pulse() {
-        // The other half of exceptions D3, and the one the pulse count depends on: a read that
-        // completed no line must leave the timer alone. Pulsing on every read instead would
-        // restart the slow-file clock mid-line (docs/testing.md B3, a `-v` line split across
-        // chunks) and again at a file boundary (docs/testing.md B7) — the bar would keep
-        // resetting on the very files it exists for.
+        // The other half of exceptions D3: a pulse means "a line completed", so a read that
+        // completed none must leave the timer alone. Both docs/testing.md B3 (a `-v` line split
+        // across chunks) and B7 (the bar switching at a file boundary) rest on that meaning —
+        // pulsing on every read instead would start an item's clock at whichever fragment
+        // happened to arrive rather than at the line that names it.
         let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         let t0 = Instant::now();

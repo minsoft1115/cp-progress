@@ -160,7 +160,8 @@ fn stdbuf_available() -> bool {
 ///
 /// Both halves are load-bearing: a directory named `stdbuf` on `PATH`, or a copy that lost its
 /// execute bit, must read as "not here" and let the search continue. Answering yes to either
-/// enters managed mode and only then fails to spawn (exceptions B8).
+/// enters managed mode and then fails to spawn `stdbuf` — `Fatal::CpSpawn`, exit 127, with the
+/// copy never running at all where plain `cp` would have succeeded (exceptions B8).
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
@@ -271,8 +272,9 @@ mod tests {
         // exceptions B8. Both halves of the probe carry weight, and dropping either one answers
         // "installed" for something cprog cannot run: a directory named `stdbuf` on PATH, or a
         // copy without its execute bit (an interrupted install, a file unpacked from an archive
-        // that lost its mode). Answering yes there means entering managed mode and *then* failing
-        // to spawn — a failure cprog manufactured, unlike C7 where cp's own tooling reports it.
+        // that lost its mode). Answering yes there enters managed mode and then fails to spawn:
+        // `Fatal::CpSpawn`, exit 127, no copy at all — a working `cp` turned into a failure by
+        // the wrapper. C7 is the opposite shape, where cp's own tooling reports the problem.
         use std::os::unix::fs::PermissionsExt;
 
         let f = TmpFile::new("exec");

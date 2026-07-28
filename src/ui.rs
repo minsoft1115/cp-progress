@@ -556,8 +556,11 @@ mod tests {
     #[test]
     fn rate_saturates_at_the_largest_unit() {
         // exceptions F18, the throughput half: UNITS stops at GiB/s, so a faster figure reads as
-        // more GiB/s rather than indexing past the end of the table. tmpfs and page-cache reads
-        // reach this; the out-of-bounds panic it prevents would reach cp's exit code.
+        // more GiB/s rather than indexing past the end of the table. No hardware copies at a
+        // TiB/s, but the figure is not a hardware measurement — `done` is the destination's
+        // logical size, and a sparse copy advances it by whole holes at a time (E4), so one
+        // 100 ms tick can span terabytes. The out-of-bounds panic this prevents would reach cp's
+        // exit code.
         assert_eq!(format_rate(Some((1u64 << 40) as f64)), "1024 GiB/s", "1 TiB/s");
         assert_eq!(format_rate(Some((1u64 << 50) as f64)), "1048576 GiB/s", "1 PiB/s");
         assert!(format_rate(Some(f64::MAX)).ends_with(" GiB/s"), "no unit above GiB/s exists");

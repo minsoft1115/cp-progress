@@ -212,9 +212,11 @@ mod tests {
 
     #[test]
     fn rate_is_per_second_not_per_window() {
-        // The rate is a *quotient*: bytes divided by the span they took. Every other rate test
-        // here happens to use a one-second span, where dividing and multiplying by the span give
-        // the same number — so none of them actually said which one this is.
+        // The rate is a *quotient*: bytes divided by the span they took. Every rate test that
+        // asserts a non-zero figure happens to use a one-second span, where dividing and
+        // multiplying by the span give the same number; the one test with a longer span
+        // (`without_reset_a_long_stop_drags_the_rate_to_zero`) has a zero delta, where they agree
+        // too. So nothing here actually said which operation this is.
         let mut m = ProgressModel::new(Some(10_000), Duration::from_secs(4));
         let t0 = Instant::now();
         m.push(t0, 0);
