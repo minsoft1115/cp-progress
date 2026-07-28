@@ -83,7 +83,7 @@ RunMode = ManagedTui | Passthrough
 ```
 Written by Torbjörn Granlund, David MacKenzie, and Jim Meyering.
                                                             ← 빈 줄
-cprog 0.4.0 — https://github.com/minsoft1115/cp-progress    ← dim
+cprog 0.5.0 — https://github.com/minsoft1115/cp-progress    ← dim
 ```
 
 빈 줄과 dim은 이 줄이 **`cp` 출력의 일부가 아님**을 알리기 위한 것이다. 둘 다 없으면 cp의 마지막
