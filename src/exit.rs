@@ -50,24 +50,17 @@ pub fn finalize(disp: ExitDisposition) -> i32 {
 /// Restore the default handler for `signal`, unblock it, and re-raise it on ourselves so cprog
 /// exits with the same signaled status `cp` did (docs/process-model.md).
 ///
-/// Best-effort: this runs on the normal main-thread call stack (after `child.wait()`), not in a
-/// signal handler, so it is ordinary code — not an async-signal-safe context. Syscall returns are
-/// intentionally unchecked; if the re-raise fails to terminate, `finalize` falls back to `128 + s`.
+/// Best-effort: if nothing here terminates the process, `finalize` falls back to `128 + s`.
+///
+/// `emulate_default_handler` is signal-hook's safe wrapper for exactly this sequence — restore
+/// the default disposition, unblock, raise — and unlike a hand-rolled version it reports whether
+/// each step worked. It looks the signal up in a table that stops at the standard set, so the
+/// realtime range comes back `EINVAL`; raising those directly is correct and complete here,
+/// because cprog installs handlers only for SIGINT/TERM/HUP/QUIT/WINCH/TSTP and anything outside
+/// that set still has its default disposition and is unblocked (docs/exceptions.md A1).
 fn reraise(signal: i32) {
-    // SAFETY: POD structs zero-initialised then filled; pointers valid; Linux-only.
-    unsafe {
-        let mut act: libc::sigaction = std::mem::zeroed();
-        // sa_flags == 0 (no SA_SIGINFO), so sa_sigaction aliases sa_handler and SIG_DFL applies.
-        act.sa_flags = 0;
-        act.sa_sigaction = libc::SIG_DFL;
-        libc::sigaction(signal, &act, std::ptr::null_mut());
-
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, signal);
-        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-
-        libc::raise(signal);
+    if signal_hook::low_level::emulate_default_handler(signal).is_err() {
+        let _ = signal_hook::low_level::raise(signal);
     }
 }
 

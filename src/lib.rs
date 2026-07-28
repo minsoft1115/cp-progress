@@ -300,8 +300,9 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
             // cursor hidden and a stale footer on screen (bug2/#2).
             if suspend.swap(false, Ordering::Relaxed) {
                 let _ = guard.suspend_restore();
-                // SAFETY: raise SIGSTOP on ourselves; returns once continued (SIGCONT).
-                unsafe { libc::raise(libc::SIGSTOP) };
+                // signal-hook's raise is a safe, async-signal-safe wrapper; it returns once we
+                // are continued (SIGCONT).
+                let _ = signal_hook::low_level::raise(libc::SIGSTOP);
                 // On resume, only take the terminal back over if we're the foreground process
                 // group again (Ctrl-Z then `fg`). If resumed in the background (Ctrl-Z then
                 // `bg`), suppress the footer so we don't take over the terminal (bug1/#1 seam).

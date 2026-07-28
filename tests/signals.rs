@@ -253,3 +253,89 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
         "cprog-alone signal must be forwarded to cp and re-raised as itself, got {status:?}"
     );
 }
+
+/// The pid of the `cp` that `cprog` spawned, once it exists. `stdbuf` execs `cp`, so it is
+/// cprog's direct child and keeps the same pid (docs/testing.md D7).
+fn cp_child_of(cprog: i32) -> Option<i32> {
+    let children = std::fs::read_to_string(format!("/proc/{cprog}/task/{cprog}/children")).ok()?;
+    children
+        .split_whitespace()
+        .filter_map(|p| p.parse::<i32>().ok())
+        .find(|p| {
+            std::fs::read_to_string(format!("/proc/{p}/comm"))
+                .is_ok_and(|c| c.trim() == "cp")
+        })
+}
+
+#[test]
+fn cp_killed_by_a_realtime_signal_still_exits_cprog_signaled() {
+    // exceptions A1 is "reproduce cp's termination exactly", and it must hold for the whole
+    // signal range, not just the named ones. This is a characterization test: it passes on the
+    // hand-rolled sigaction/raise, and it is what stops a switch to
+    // signal_hook::low_level::emulate_default_handler from silently weakening the contract —
+    // that function's table covers the standard signals only and reports EINVAL for
+    // SIGRTMIN..SIGRTMAX, which would turn a signaled death into a plain `128+s` exit (#43).
+    //
+    // cp is signalled alone rather than the group: a realtime signal delivered to cprog itself
+    // has no handler, so cprog would die of it directly and never reach the re-raise path.
+    let tmp = TmpDir::new("rtsig");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+    let cprog_pid = child.id() as i32;
+    let rtmin = libc::SIGRTMIN();
+
+    let bar: [u8; 3] = [0xE2, 0x96, 0x88]; // █
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut killed = false;
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => {
+                out.extend_from_slice(&buf[..n]);
+                // Wait for the footer so the managed path is genuinely running, then take cp
+                // out with a signal signal-hook's table does not know.
+                if !killed && out.windows(3).any(|w| w == bar) {
+                    if let Some(cp) = cp_child_of(cprog_pid) {
+                        // SAFETY: a live pid and a valid signal number; ESRCH if it just exited.
+                        unsafe { libc::kill(cp, rtmin) };
+                        killed = true;
+                    }
+                }
+            }
+        }
+    }
+    let status = child.wait().unwrap();
+
+    assert!(killed, "never found cp to signal, so the path was not exercised");
+    assert_eq!(
+        status.signal(),
+        Some(rtmin),
+        "cprog must die of the same realtime signal cp did, not exit {} normally",
+        128 + rtmin
+    );
+}
