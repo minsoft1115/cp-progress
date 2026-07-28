@@ -111,6 +111,27 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_threshold_makes_everything_slow_from_the_first_instant_after_a_pulse() {
+        // exceptions H2: CPROG_SLOW_THRESHOLD_MS=0 is a real setting, not an error. With `>` the
+        // boundary stays exclusive, so the pulse instant itself is still not slow — anything
+        // after it is. The integration suite leans on this shape at 1ms; nothing pinned 0.
+        let mut t = SlowTimer::new(Duration::ZERO);
+        let t0 = Instant::now();
+        t.on_pulse(t0);
+        assert!(!t.is_slow(t0), "the pulse instant is not yet slow (`>` is exclusive)");
+        assert!(t.is_slow(t0 + Duration::from_nanos(1)), "everything after it is");
+        assert!(t.is_slow(t0 + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_zero_threshold_still_reports_nothing_before_the_first_pulse() {
+        // The "no pulse yet" guard must win over the threshold, or a zero threshold would draw a
+        // bar before cp has even named a file.
+        let t = SlowTimer::new(Duration::ZERO);
+        assert!(!t.is_slow(Instant::now()));
+    }
+
+    #[test]
     fn default_threshold_is_100ms() {
         assert_eq!(DEFAULT_SLOW_THRESHOLD, Duration::from_millis(100));
     }

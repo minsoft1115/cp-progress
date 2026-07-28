@@ -212,6 +212,27 @@ mod tests {
     }
 
     #[test]
+    fn a_non_terminal_fd_is_treated_as_foreground() {
+        // exceptions B10. `tcgetpgrp` fails with ENOTTY on anything that is not a terminal, and
+        // that answer is "I cannot tell", not "you are backgrounded". cprog is lenient there: a
+        // genuinely backgrounded job *does* have a controlling terminal and is detected by the
+        // pgrp comparison, so leniency costs nothing and refusing would disable the footer for
+        // anyone whose stdout is not the controlling terminal.
+        use std::os::fd::AsRawFd;
+        let path = std::env::temp_dir().join(format!("cprog_fg_{}", std::process::id()));
+        let f = std::fs::File::create(&path).unwrap();
+        let fd = f.as_raw_fd();
+        assert!(
+            unsafe { libc::tcgetpgrp(fd) } < 0,
+            "precondition: a regular file must not answer tcgetpgrp"
+        );
+        let got = is_foreground(fd);
+        drop(f);
+        std::fs::remove_file(&path).ok();
+        assert!(got, "an unanswerable tcgetpgrp must not read as backgrounded");
+    }
+
+    #[test]
     fn color_rule() {
         assert!(color_from(false, Some("xterm-256color")));
         assert!(!color_from(true, Some("xterm")), "NO_COLOR disables colour");
