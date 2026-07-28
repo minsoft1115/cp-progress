@@ -7,10 +7,9 @@
 //! on top.
 
 use std::io::{self, IsTerminal};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::Duration;
-
-use libc::c_int;
 
 use crate::plan::Capabilities;
 use crate::ui::Style;
@@ -47,12 +46,12 @@ pub fn detect() -> Capabilities {
     Capabilities {
         stdout_tty: io::stdout().is_terminal(),
         stderr_tty: io::stderr().is_terminal(),
-        same_terminal: same_terminal_fds(libc::STDOUT_FILENO, libc::STDERR_FILENO),
+        same_terminal: same_terminal_fds(io::stdout(), io::stderr()),
         term_ok: term_ok(std::env::var("TERM").ok().as_deref()),
         ci: std::env::var_os("CI").is_some(),
         linux_proc: proc_available(),
         stdbuf: stdbuf_available(),
-        foreground: is_foreground(libc::STDOUT_FILENO),
+        foreground: is_foreground(io::stdout()),
         passthrough_forced: passthrough_forced(),
     }
 }
@@ -72,12 +71,19 @@ pub fn passthrough_forced() -> bool {
 ///
 /// Checked at startup and re-checked when resuming from a `SIGTSTP` suspend (a `Ctrl-Z` then
 /// `bg` can move us to the background), so the footer is never drawn from a background job.
-pub fn is_foreground(fd: c_int) -> bool {
-    let fg = unsafe { libc::tcgetpgrp(fd) };
-    if fg < 0 {
-        return true; // e.g. ENOTTY: not our controlling terminal -> can't tell -> allow
+pub fn is_foreground<F: AsFd>(fd: F) -> bool {
+    match rustix::termios::tcgetpgrp(fd) {
+        Ok(fg) => fg == rustix::process::getpgrp(),
+        // A terminal with *no* foreground process group answers with pgid 0, which rustix
+        // reports as `OPNOTSUPP` rather than handing back a `Pid` that cannot exist. A pty
+        // master is the case that reaches this: nobody is in front of one, and drawing a footer
+        // into a master would deliver it as *input* on the slave. That is a definite "not the
+        // foreground", not an unanswerable question, so it is the one error that means no
+        // (docs/exceptions.md B10).
+        Err(rustix::io::Errno::OPNOTSUPP) => false,
+        // Anything else — ENOTTY above all — is "cannot tell", and cprog is lenient there.
+        Err(_) => true,
     }
-    fg == unsafe { libc::getpgrp() }
 }
 
 /// Detect colour/glyph [`Style`] from the environment (docs/ui.md "색/글리프 정책").
@@ -111,29 +117,27 @@ fn locale() -> Option<String> {
         .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
 }
 
-/// Read a fd's `(st_dev, st_ino)` via `fstat`.
-// The casts are no-ops on 64-bit glibc but keep this portable across Linux arches where
-// dev_t/ino_t widths differ.
+/// Read a fd's `(st_dev, st_ino)`. Takes the fd rather than a path: the question is about the
+/// *streams* cprog was handed, which have no name to stat.
+// The casts are no-ops on 64-bit Linux but keep this portable across arches where the widths
+// differ.
 #[allow(clippy::unnecessary_cast)]
-fn dev_ino(fd: c_int) -> io::Result<DevIno> {
-    // SAFETY: fstat writes into a zeroed stat buffer; we check the return code.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd, &mut st) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
+fn dev_ino<F: AsFd>(fd: F) -> io::Result<DevIno> {
+    let st = rustix::fs::fstat(fd)?;
     Ok(DevIno { dev: st.st_dev as u64, ino: st.st_ino as u64 })
 }
 
 /// Whether two fds resolve to the same terminal; false if either cannot be stat'd.
-fn same_terminal_fds(a: c_int, b: c_int) -> bool {
+fn same_terminal_fds<A: AsFd, B: AsFd>(a: A, b: B) -> bool {
     matches!((dev_ino(a), dev_ino(b)), (Ok(x), Ok(y)) if same_terminal(&x, &y))
 }
 
 /// Query a terminal's size via `TIOCGWINSZ`, or `None` if the fd is not a sized terminal.
-pub fn terminal_size(fd: c_int) -> Option<TerminalSize> {
-    // SAFETY: ioctl writes into a zeroed winsize; we check the return code.
-    let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
-    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws) } != 0 || ws.ws_col == 0 {
+pub fn terminal_size<F: AsFd>(fd: F) -> Option<TerminalSize> {
+    // A zero column count means the terminal never had its size set (a PTY nobody sized), which
+    // is as unusable for layout as an outright error.
+    let ws = rustix::termios::tcgetwinsize(fd).ok()?;
+    if ws.ws_col == 0 {
         return None;
     }
     Some(TerminalSize::new(ws.ws_col, ws.ws_row))
@@ -199,16 +203,48 @@ mod tests {
         assert!(!same_terminal(&a, &DevIno { dev: 5, ino: 8 }), "different inode");
     }
 
-    #[test]
-    fn terminal_size_of_bad_fd_is_none() {
-        assert_eq!(terminal_size(-1), None);
+    /// A regular file inside the temp dir, removed when the guard drops.
+    struct TmpFile(std::path::PathBuf, std::fs::File);
+    impl TmpFile {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir()
+                .join(format!("cprog_term_{}_{}", std::process::id(), tag));
+            let f = std::fs::File::create(&p).unwrap();
+            TmpFile(p, f)
+        }
+    }
+    impl Drop for TmpFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     #[test]
-    fn same_terminal_fds_matches_itself_and_rejects_bad_fd() {
-        // fd 1 fstat'd twice is identical; a bad fd cannot match anything.
-        assert!(same_terminal_fds(1, 1));
-        assert!(!same_terminal_fds(1, -1));
+    fn terminal_size_of_a_non_terminal_is_none() {
+        // A regular file is not a terminal, so the size query fails with ENOTTY and there is no
+        // layout to compute. This replaces an fd of -1, which `BorrowedFd` cannot hold — and it
+        // is the better test anyway: "stdout is not a terminal" is a condition that actually
+        // occurs (any redirect), whereas a fabricated bad descriptor never does.
+        let f = TmpFile::new("ws");
+        assert!(
+            rustix::termios::tcgetwinsize(&f.1).is_err(),
+            "precondition: a regular file must not answer a size query"
+        );
+        assert_eq!(terminal_size(&f.1), None);
+    }
+
+    #[test]
+    fn same_terminal_fds_matches_itself_and_separates_distinct_files() {
+        // stdout stat'd twice is the same (dev, ino); two different files are not. The second
+        // half is what B4 actually guards — stdout and stderr pointing somewhere different —
+        // and a fabricated bad fd never exercised it.
+        //
+        // The `Err` arm of the composition is not reachable here: with a valid `BorrowedFd`
+        // there is no way to make `fstat` fail. The rule it guards is covered directly by
+        // `same_terminal_requires_both_dev_and_ino`.
+        assert!(same_terminal_fds(io::stdout(), io::stdout()));
+        let (a, b) = (TmpFile::new("dev_a"), TmpFile::new("dev_b"));
+        assert!(!same_terminal_fds(&a.1, &b.1), "different files are different (dev, ino)");
     }
 
     #[test]
@@ -218,18 +254,12 @@ mod tests {
         // genuinely backgrounded job *does* have a controlling terminal and is detected by the
         // pgrp comparison, so leniency costs nothing and refusing would disable the footer for
         // anyone whose stdout is not the controlling terminal.
-        use std::os::fd::AsRawFd;
-        let path = std::env::temp_dir().join(format!("cprog_fg_{}", std::process::id()));
-        let f = std::fs::File::create(&path).unwrap();
-        let fd = f.as_raw_fd();
+        let f = TmpFile::new("fg");
         assert!(
-            unsafe { libc::tcgetpgrp(fd) } < 0,
+            rustix::termios::tcgetpgrp(&f.1).is_err(),
             "precondition: a regular file must not answer tcgetpgrp"
         );
-        let got = is_foreground(fd);
-        drop(f);
-        std::fs::remove_file(&path).ok();
-        assert!(got, "an unanswerable tcgetpgrp must not read as backgrounded");
+        assert!(is_foreground(&f.1), "an unanswerable tcgetpgrp must not read as backgrounded");
     }
 
     #[test]

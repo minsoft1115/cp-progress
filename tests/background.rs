@@ -80,3 +80,69 @@ fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
     assert!(!contains(&out, b"\x1b[?25l"), "backgrounded cprog hid the cursor (managed TUI)");
     assert!(!contains(&out, b"\x1b[K"), "backgrounded cprog drew a footer (managed TUI)");
 }
+
+#[test]
+fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
+    // exceptions B10, the half that is a definite "no" rather than "cannot tell".
+    //
+    // A pty master is a terminal by every other test cprog makes — `isatty` says yes, stdout and
+    // stderr share it, `TERM` is fine — so nothing else stops managed mode. What stops it is
+    // that a master has no foreground process group: `tcgetpgrp` answers with pgid 0. Drawing a
+    // footer into a master would not reach a screen at all; it would arrive as *input* on the
+    // slave, i.e. as keystrokes for whatever is reading there.
+    //
+    // Regression guard for the rustix migration (#42). libc returned that 0 verbatim and the
+    // pgrp comparison failed, so cprog passed through by accident. rustix reports it as
+    // `OPNOTSUPP` instead, and mapping every error to "cannot tell" would have turned an
+    // accidental correctness into a real bug.
+    use std::os::fd::{AsRawFd, OwnedFd};
+    use std::process::{Command, Stdio};
+
+    let tmp = TmpDir::new("ptymaster");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    // Big enough that a footer would certainly have been drawn at a 1 ms threshold.
+    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
+
+    let pty = openpty(None, None).expect("openpty");
+    let master_out: OwnedFd = pty.master.try_clone().unwrap();
+    let master_err: OwnedFd = pty.master.try_clone().unwrap();
+    let slave_fd = pty.slave.as_raw_fd();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(master_out))
+        .stderr(Stdio::from(master_err))
+        .spawn()
+        .expect("spawn cprog");
+
+    // Read the *slave* — anything cprog wrote to the master surfaces there. Draining keeps a
+    // regression visible as a failed assertion rather than a hang on a full input queue.
+    let mut seen = Vec::new();
+    let mut slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        drain(&mut slave, slave_fd, &mut seen, Instant::now() + Duration::from_millis(100), None);
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+    }
+    let status = child.wait().expect("wait cprog");
+
+    assert!(status.success(), "the copy itself still succeeds: {status:?}");
+    assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "and really happened");
+    assert!(
+        !contains(&seen, &[0xE2, 0x96, 0x88]) && !contains(&seen, &[0xE2, 0x96, 0x91]),
+        "no footer may be written into a pty master: {:?}",
+        String::from_utf8_lossy(&seen[..seen.len().min(160)])
+    );
+    assert!(seen.is_empty(), "passthrough with no -v emits nothing at all: {} bytes", seen.len());
+}

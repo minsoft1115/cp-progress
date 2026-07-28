@@ -105,13 +105,18 @@ pub fn spawn(spec: &CommandSpec) -> io::Result<Child> {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
 
-    // If cprog dies, don't leave cp orphaned (docs/process-model.md). Best-effort: a failure to
-    // set the death signal must not abort the copy, so the pre_exec error is swallowed.
+    // If cprog dies, don't leave cp orphaned (docs/process-model.md, exceptions C4). Best-effort:
+    // a failure to set the death signal must not abort the copy, so the error is swallowed.
+    //
+    // SAFETY: `pre_exec` runs between fork and exec, so the closure must be async-signal-safe.
+    // `set_parent_process_death_signal` is one `prctl` — no allocation, no locks.
     #[cfg(target_os = "linux")]
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong, 0, 0, 0);
+            let _ = rustix::process::set_parent_process_death_signal(Some(
+                rustix::process::Signal::TERM,
+            ));
             Ok(())
         });
     }
