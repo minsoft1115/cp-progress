@@ -442,7 +442,8 @@ mod name_row_tests {
     #[test]
     fn control_characters_are_removed_before_fitting() {
         // A path from /proc/<pid>/fd can legally contain a newline. Emitting one would push the
-        // footer past its row count and corrupt the screen (ui.md invariant 7, exceptions C5).
+        // footer past its row count and corrupt the screen (ui.md invariant 7, exceptions F19,
+        // docs/testing.md C5).
         let got = name_row("/mnt/we\nird\ta\u{1b}[31m.iso", 40, Style::plain());
         assert!(!got.contains('\n') && !got.contains('\r'), "no newlines: {got:?}");
         assert!(!got.chars().any(|c| c.is_control()), "no control characters: {got:?}");
@@ -558,9 +559,9 @@ mod tests {
         // exceptions F18, the throughput half: UNITS stops at GiB/s, so a faster figure reads as
         // more GiB/s rather than indexing past the end of the table. No hardware copies at a
         // TiB/s, but the figure is not a hardware measurement — `done` is the destination's
-        // logical size, and a sparse copy advances it by whole holes at a time (E4), so one
-        // 100 ms tick can span terabytes. The out-of-bounds panic this prevents would reach cp's
-        // exit code.
+        // logical size, and a sparse copy advances it by whole holes at a time (exceptions E4),
+        // so a single sample can span terabytes over the one-second rate window. The
+        // out-of-bounds panic this prevents would reach cp's exit code.
         assert_eq!(format_rate(Some((1u64 << 40) as f64)), "1024 GiB/s", "1 TiB/s");
         assert_eq!(format_rate(Some((1u64 << 50) as f64)), "1048576 GiB/s", "1 PiB/s");
         assert!(format_rate(Some(f64::MAX)).ends_with(" GiB/s"), "no unit above GiB/s exists");
@@ -634,7 +635,7 @@ mod tests {
         assert!(b.ends_with("░░░░░"), "empty stays uncoloured");
     }
 
-    // ---- footer suppression (C3) -----------------------------------------------------
+    // ---- footer suppression (docs/testing.md C3) -----------------------------------------------------
 
     #[test]
     fn footer_suppressed_when_terminal_too_short() {

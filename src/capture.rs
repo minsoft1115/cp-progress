@@ -246,6 +246,30 @@ mod tests {
     }
 
     #[test]
+    fn a_real_read_error_ends_the_stdout_relay_too() {
+        // The twin of `a_real_read_error_still_ends_the_relay`, for the *other* reader. D8 is one
+        // rule over two functions, and only `relay_bytes` had both halves pinned: turning
+        // `relay_stdout`'s guard into "retry every error" left the whole suite green, so nothing
+        // said that a permanently failing stdout ends the loop rather than spinning the thread
+        // forever — with `cp` never reaped and the footer never cleaned up.
+        //
+        // Verified by mutation the way a non-terminating rule has to be: with the guard widened,
+        // this test does not fail, it *hangs* (which is how cargo-mutants scores it — a timeout
+        // is a detection). Unmutated it returns immediately.
+        struct AlwaysBroken;
+        impl std::io::Read for AlwaysBroken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fd is gone"))
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        relay_stdout(AlwaysBroken, &slow, &tx, true);
+        drop(tx);
+        assert!(rx.into_iter().next().is_none(), "returns instead of looping");
+    }
+
+    #[test]
     fn relay_bytes_forwards_verbatim() {
         let (tx, rx) = mpsc::sync_channel(16);
         relay_bytes(Cursor::new(b"cp: error\n".to_vec()), &tx);

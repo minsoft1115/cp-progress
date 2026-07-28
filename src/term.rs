@@ -159,9 +159,12 @@ fn stdbuf_available() -> bool {
 /// Whether `p` is a regular, executable file.
 ///
 /// Both halves are load-bearing: a directory named `stdbuf` on `PATH`, or a copy that lost its
-/// execute bit, must read as "not here" and let the search continue. Answering yes to either
-/// enters managed mode and then fails to spawn `stdbuf` — `Fatal::CpSpawn`, exit 127, with the
-/// copy never running at all where plain `cp` would have succeeded (exceptions B8).
+/// execute bit, must read as "not here" and let the search continue. Answering yes stops the
+/// search there, and if that entry was the only `stdbuf` on `PATH` the spawn then fails with
+/// `EACCES` — `Fatal::CpSpawn`, exit 127, the copy never running at all where plain `cp` would
+/// have succeeded. With a working `stdbuf` further along `PATH`, `execvp` skips the bad entry
+/// and the run is unaffected, which is why the probe's job is to keep looking rather than to
+/// answer early (exceptions B8).
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
@@ -272,9 +275,12 @@ mod tests {
         // exceptions B8. Both halves of the probe carry weight, and dropping either one answers
         // "installed" for something cprog cannot run: a directory named `stdbuf` on PATH, or a
         // copy without its execute bit (an interrupted install, a file unpacked from an archive
-        // that lost its mode). Answering yes there enters managed mode and then fails to spawn:
-        // `Fatal::CpSpawn`, exit 127, no copy at all — a working `cp` turned into a failure by
-        // the wrapper. C7 is the opposite shape, where cp's own tooling reports the problem.
+        // that lost its mode). Answering yes stops the PATH search at that entry; if it was the
+        // only `stdbuf` there, the spawn fails with EACCES and cprog exits 127 without copying
+        // anything — a working `cp` turned into a failure by the wrapper. (With a real `stdbuf`
+        // later on PATH, execvp skips the bad entry and nothing is lost, which is exactly why
+        // the probe must keep searching rather than answer early.) C7 is the opposite shape,
+        // where cp's own tooling reports the problem.
         use std::os::unix::fs::PermissionsExt;
 
         let f = TmpFile::new("exec");

@@ -86,7 +86,7 @@ mod tests {
         v.iter().map(OsString::from).collect()
     }
 
-    // ---- empty (D5) ------------------------------------------------------------------
+    // ---- empty (docs/testing.md D5) ------------------------------------------------------------------
 
     #[test]
     fn no_args_is_usage_error() {
@@ -117,7 +117,7 @@ mod tests {
         assert!(!inspect(&args(&["a", "b"])).unwrap().informational);
     }
 
-    // ---- interactive detection (E2, runtime-model) -----------------------------------
+    // ---- interactive detection (docs/testing.md E2, runtime-model) -----------------------------------
 
     #[test]
     fn short_interactive() {
@@ -148,7 +148,7 @@ mod tests {
         assert!(inspect(&args(&["src", "-i", "dst"])).unwrap().interactive);
     }
 
-    // ---- verbose detection / double-injection guard (B8) -----------------------------
+    // ---- verbose detection / double-injection guard (docs/testing.md B8) -----------------------------
 
     #[test]
     fn short_verbose() {

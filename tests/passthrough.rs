@@ -63,7 +63,7 @@ fn preserves_nonzero_exit_on_cp_failure() {
     let theirs = cp([missing.as_os_str(), dst.as_os_str()]);
     assert_ne!(mine.status.code(), Some(0));
     assert_eq!(mine.status.code(), theirs.status.code(), "same exit code as cp");
-    // E1: passthrough leaves the environment untouched, so cp's error text (locale included)
+    // docs/testing.md E1: passthrough leaves the environment untouched, so cp's error text (locale included)
     // is byte-identical to running cp directly. A leaked LC_ALL=C would diverge here.
     assert_eq!(mine.stderr, theirs.stderr, "cp's error output is byte-identical");
 }

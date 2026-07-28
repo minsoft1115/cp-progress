@@ -20,8 +20,8 @@ pub const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(1);
 pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
     match total {
         None => None,
-        Some(0) => Some(100.0),                    // A5: complete, and no divide-by-zero
-        Some(total) => Some((done as f64 / total as f64 * 100.0).clamp(0.0, 100.0)), // A6 clamp
+        Some(0) => Some(100.0),                    // docs/testing.md A5: complete, and no divide-by-zero
+        Some(total) => Some((done as f64 / total as f64 * 100.0).clamp(0.0, 100.0)), // docs/testing.md A6 clamp
     }
 }
 
@@ -101,7 +101,7 @@ impl ProgressModel {
     }
 
     /// Smoothed throughput (bytes/sec) across the window, or `None` with fewer than two
-    /// samples or a zero time span. A flat or negative delta yields exactly `0.0` (A7).
+    /// samples or a zero time span. A flat or negative delta yields exactly `0.0` (docs/testing.md A7).
     pub fn rate(&self) -> Option<f64> {
         if self.samples.len() < 2 {
             return None;
@@ -126,7 +126,7 @@ impl ProgressModel {
         }
         let rate = self.rate()?;
         if rate <= 0.0 {
-            return None; // A7: no forward progress -> eta unknown
+            return None; // docs/testing.md A7: no forward progress -> eta unknown
         }
         // try_from_secs_f64 rejects non-finite/overflowing durations instead of panicking.
         Duration::try_from_secs_f64(remaining as f64 / rate).ok()
@@ -159,7 +159,7 @@ mod tests {
         (a - b).abs() < 1e-6
     }
 
-    // ---- percent (A5 / A6, indeterminate) --------------------------------------------
+    // ---- percent (docs/testing.md A5 / A6, indeterminate) --------------------------------------------
 
     #[test]
     fn percent_basic_ratio() {
