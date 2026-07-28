@@ -263,6 +263,40 @@ mod tests {
     }
 
     #[test]
+    fn the_stdbuf_probe_requires_a_regular_executable_file() {
+        // exceptions B8. Both halves of the probe carry weight, and dropping either one answers
+        // "installed" for something cprog cannot run: a directory named `stdbuf` on PATH, or a
+        // copy without its execute bit (an interrupted install, a file unpacked from an archive
+        // that lost its mode). Answering yes there means entering managed mode and *then* failing
+        // to spawn — a failure cprog manufactured, unlike C7 where cp's own tooling reports it.
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = TmpFile::new("exec");
+        std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_file(&f.0), "a regular file with an execute bit is usable");
+
+        std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_file(&f.0), "no execute bit -> not usable");
+
+        // A directory, executable bits and all: searchable, but not something to exec.
+        let dir = std::env::temp_dir().join(format!("cprog_term_{}_dir", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        struct RmDir(std::path::PathBuf);
+        impl Drop for RmDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = RmDir(dir);
+        assert!(
+            std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o111 != 0,
+            "precondition: a directory carries execute (search) bits"
+        );
+        assert!(!is_executable_file(&dir.0), "a directory is not an executable file");
+    }
+
+    #[test]
     fn color_rule() {
         assert!(color_from(false, Some("xterm-256color")));
         assert!(!color_from(true, Some("xterm")), "NO_COLOR disables colour");

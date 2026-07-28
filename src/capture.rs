@@ -104,6 +104,24 @@ mod tests {
     }
 
     #[test]
+    fn a_chunk_without_a_line_boundary_does_not_pulse() {
+        // The other half of D3, and the one the pulse count depends on: a read that completed no
+        // line must leave the timer alone. Pulsing on every read instead would restart the
+        // slow-file clock mid-line (B3, a `-v` line split across chunks) and again at a file
+        // boundary (B7) — the bar would keep resetting on the very files it exists for.
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        let t0 = Instant::now();
+        relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx, true);
+        drop(tx);
+        let _: Vec<u8> = rx.into_iter().flatten().collect();
+        assert!(
+            !slow.lock().unwrap().is_slow(t0 + Duration::from_secs(10)),
+            "no line completed -> no pulse -> nothing has started being timed"
+        );
+    }
+
+    #[test]
     fn without_verbose_the_bytes_are_dropped_but_the_timer_still_pulses() {
         // #20: `-v` is injected for timing whether or not the user asked for it, so the pulse
         // must survive; the bytes must not, or cprog floods a scrollback nobody asked to fill.

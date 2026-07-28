@@ -496,6 +496,60 @@ mod tests {
     }
 
     #[test]
+    fn equal_growth_keeps_the_candidate_seen_first() {
+        // exceptions E24. Two candidates that grew by exactly the same amount say nothing about
+        // which one `cp` is writing, so the comparison stays exclusive (`>`) and the first
+        // candidate seen keeps the tick. Which file wins is not the point — nothing makes either
+        // of them the right answer — but a rule that switched on a tie would hand the bar back
+        // and forth between the two for as long as they grow in step.
+        let proc = FakeProc::new(vec![write_fd(4, "/dst/first"), write_fd(5, "/dst/second")]);
+        let stat = FakeStat::default();
+        stat.set("/dst/first", Ok(FileStat { size: 100 }));
+        stat.set("/dst/second", Ok(FileStat { size: 100 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+        assert_eq!(s.tick(t0), Tick::Skip, "no growth history yet -> no guess");
+
+        for n in 1..=3u64 {
+            let size = 100 + n * 500; // both grow by the same amount, every tick
+            stat.set("/dst/first", Ok(FileStat { size }));
+            stat.set("/dst/second", Ok(FileStat { size }));
+            let st = s.tick(t0 + Duration::from_millis(n * 100)).sample().unwrap();
+            assert_eq!(st.name, "/dst/first", "tick {n}: a tie must not move the bar");
+        }
+    }
+
+    #[test]
+    fn reset_rate_history_clears_the_current_files_history() {
+        // A13 / #9 at the sampler level. `ProgressModel::reset_samples` is what drops the samples
+        // and is tested there, but the Ctrl-Z path reaches it through this wrapper, and the
+        // suspend tests assert on the footer rather than on the rate. Emptying this function's
+        // body therefore changed nothing any test could see.
+        let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
+        let stat = FakeStat::default();
+        stat.set("/src/a.iso", Ok(FileStat { size: 10_000 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
+        s.tick(t0);
+        stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
+        let before = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
+        assert!(before.rate.is_some(), "two samples inside the window give a rate");
+
+        s.reset_rate_history();
+
+        // Resumed a minute later, having copied nothing while stopped. Without the reset those
+        // two facts average into a rate of ~0 for a full window; with it, one post-resume sample
+        // is simply not enough to state a rate at all.
+        stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
+        let after = s.tick(t0 + Duration::from_secs(61)).sample().unwrap();
+        assert_eq!(after.rate, None, "the stopped span must not be averaged in");
+        assert_eq!(after.name, "/dst/a.iso", "identity survives: the same file is still copying");
+        assert_eq!(after.total, Some(10_000), "and so does its total — that is not timing data");
+    }
+
+    #[test]
     fn an_inherited_read_fd_does_not_become_the_total() {
         // #11 at the sampler level: `exec 3<other` leaves a low read fd in cp. `total` must come
         // from the real source (paired by fd position), not from the decoy — otherwise the ratio

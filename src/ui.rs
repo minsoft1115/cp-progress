@@ -522,6 +522,18 @@ mod tests {
     }
 
     #[test]
+    fn size_saturates_at_the_largest_unit() {
+        // exceptions F18. Past the end of SIZE_UNITS the number keeps growing in TiB rather than
+        // the unit index walking off the table — which would be an out-of-bounds panic, and a
+        // panic is exit 101 over cp's own status. A petabyte is not exotic: `truncate -s 1P`
+        // makes one instantly and cprog measures the logical length (E4).
+        assert_eq!(format_size(0, Some(1 << 50)), "0.0/1024.0 TiB", "1 PiB total");
+        assert_eq!(format_size(1 << 50, Some(1 << 51)), "1024.0/2048.0 TiB");
+        assert_eq!(format_size(1 << 60, None), "1048576.0 TiB", "1 EiB copied");
+        assert_eq!(format_size(u64::MAX, None), "16777216.0 TiB", "and the largest u64 there is");
+    }
+
+    #[test]
     fn rate_scales_units_and_unknown() {
         assert_eq!(format_rate(Some(512.0)), "512 B/s");
         assert_eq!(format_rate(Some(142.0 * 1024.0 * 1024.0)), "142 MiB/s");
@@ -533,11 +545,25 @@ mod tests {
     }
 
     #[test]
+    fn rate_saturates_at_the_largest_unit() {
+        // exceptions F18, the throughput half: UNITS stops at GiB/s, so a faster figure reads as
+        // more GiB/s rather than indexing past the end of the table. tmpfs and page-cache reads
+        // reach this; the out-of-bounds panic it prevents would reach cp's exit code.
+        assert_eq!(format_rate(Some((1u64 << 40) as f64)), "1024 GiB/s", "1 TiB/s");
+        assert_eq!(format_rate(Some((1u64 << 50) as f64)), "1048576 GiB/s", "1 PiB/s");
+        assert!(format_rate(Some(f64::MAX)).ends_with(" GiB/s"), "no unit above GiB/s exists");
+    }
+
+    #[test]
     fn eta_formats_mmss_hhmmss_and_unknown() {
         assert_eq!(format_eta(Some(Duration::from_secs(5))), "00:05");
         assert_eq!(format_eta(Some(Duration::from_secs(65))), "01:05");
         assert_eq!(format_eta(Some(Duration::from_secs(3665))), "1:01:05");
         assert_eq!(format_eta(None), "--:--");
+        // The hour boundary itself: 3600 s is the first value written as H:MM:SS, so it is
+        // `1:00:00` and never `60:00` (docs/ui.md).
+        assert_eq!(format_eta(Some(Duration::from_secs(3599))), "59:59");
+        assert_eq!(format_eta(Some(Duration::from_secs(3600))), "1:00:00");
     }
 
     // ---- quantized bar width ---------------------------------------------------------
@@ -654,6 +680,33 @@ mod tests {
         let line = render_footer(TerminalSize::new(6, 24), &state(), Style::plain()).unwrap();
         let (eta, rate, size, bar, pct) = fields(&line);
         assert!(pct && !eta && !rate && !size && !bar, "only percent at width 6: {line:?}");
+    }
+
+    #[test]
+    fn a_layout_that_exactly_fits_is_not_shed() {
+        // exceptions F4: the shedding test is `fixed + separators > cols`, exclusive, so a layout
+        // that uses the last available column is kept. Filling the width is not overflowing it —
+        // invariant 7 asks the row not to exceed the terminal, not to leave slack.
+        //
+        // This is `compose`'s own boundary rather than one visible through `render_footer`: the
+        // bar-less attempt is the last rung of the ladder, and the last-resort line below it
+        // prints the same percent field either way (F5). Both spellings agree end to end, which
+        // is exactly why nothing was pinning the rule down.
+        let pct = Some(62.34);
+        let pct_s = format_percent(pct);
+        let fields = || Fields { pct: &pct_s, size: None, rate: None, eta: None };
+        let width = pct_s.width();
+
+        assert_eq!(
+            compose(width, false, pct, fields(), Style::plain()).as_deref(),
+            Some(pct_s.as_str()),
+            "a row that fills the terminal exactly is kept"
+        );
+        assert_eq!(
+            compose(width - 1, false, pct, fields(), Style::plain()),
+            None,
+            "one column short is a genuine overflow"
+        );
     }
 
     #[test]

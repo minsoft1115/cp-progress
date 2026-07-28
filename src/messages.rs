@@ -265,6 +265,12 @@ mod tests {
     fn duration_formats_hours() {
         let s = summary(&ExitDisposition::Code(0), Duration::from_secs(3665), plain(), true);
         assert_eq!(s.as_deref(), Some("✓ done - 1:01:05 elapsed"));
+        // The boundary: 3600 s is the first elapsed time written as H:MM:SS, so the summary of an
+        // hour-long copy reads `1:00:00`, not `60:00` (docs/ui.md, same rule as the footer's eta).
+        let one_hour = summary(&ExitDisposition::Code(0), Duration::from_secs(3600), plain(), true);
+        assert_eq!(one_hour.as_deref(), Some("✓ done - 1:00:00 elapsed"));
+        let just_under = summary(&ExitDisposition::Code(0), Duration::from_secs(3599), plain(), true);
+        assert_eq!(just_under.as_deref(), Some("✓ done - 59:59 elapsed"));
     }
 
     #[test]

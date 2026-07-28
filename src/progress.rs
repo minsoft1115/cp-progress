@@ -211,6 +211,24 @@ mod tests {
     }
 
     #[test]
+    fn rate_is_per_second_not_per_window() {
+        // The rate is a *quotient*: bytes divided by the span they took. Every other rate test
+        // here happens to use a one-second span, where dividing and multiplying by the span give
+        // the same number — so none of them actually said which one this is.
+        let mut m = ProgressModel::new(Some(10_000), Duration::from_secs(4));
+        let t0 = Instant::now();
+        m.push(t0, 0);
+        m.push(t0 + Duration::from_secs(2), 300);
+        assert!(approx(m.rate().unwrap(), 150.0), "300 bytes over 2 s = 150 B/s");
+
+        // And on the other side of 1 s, where the two also disagree.
+        let mut half = ProgressModel::new(Some(10_000), Duration::from_secs(4));
+        half.push(t0, 0);
+        half.push(t0 + Duration::from_millis(500), 100);
+        assert!(approx(half.rate().unwrap(), 200.0), "100 bytes over 0.5 s = 200 B/s");
+    }
+
+    #[test]
     fn rate_zero_when_no_increase() {
         // docs/testing.md A7: no increase between samples -> rate ~= 0.
         let mut m = model(Some(1000));

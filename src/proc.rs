@@ -261,12 +261,17 @@ mod tests {
 
     #[test]
     fn redirected_low_fds_are_not_selected() {
-        // `cprog a b < in > out` in a terminal: fd0/fd1 are regular files but are stdio, not
-        // cp's copy fds. Only fd > 2 counts.
+        // `cprog a b < in > out 2> err` in a terminal: fd0/fd1/fd2 are regular files but are
+        // stdio, not cp's copy fds. Only fd > 2 counts.
+        //
+        // exceptions E11: the exclusion is by fd *number*, not by kind. Leaving fd 2 as some
+        // non-regular thing here would have let the kind filter do the rejecting and never asked
+        // whether the number rule holds at its own boundary — and `2>` is the one redirect that
+        // makes stdio a regular write fd, the exact shape the rule exists to reject.
         let e = vec![
             entry(0, "/in", FdKind::RegularRead),
             entry(1, "/out", FdKind::RegularWrite),
-            entry(2, "/dev/pts/1", FdKind::Other),
+            entry(2, "/err", FdKind::RegularWrite),
         ];
         assert_eq!(select_current(&e), None);
     }

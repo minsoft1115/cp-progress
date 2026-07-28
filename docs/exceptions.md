@@ -54,7 +54,7 @@
 | A10 | **Ctrl-Z 후 `bg`** (백그라운드 재개) | 재개 시점에 `tcgetpgrp != getpgrp`이면 `suppressed = true` → 이후 footer를 그리지 않음. **단방향**: 다시 `fg`로 돌아와도 그 실행에서는 꺼진 채 유지(다시 Ctrl-Z→`fg` 하면 복구) | ✅ `lib.rs::run_managed`, `tests/suspend.rs::ctrl_z_then_bg_does_not_redraw_footer_in_background`, 복구 경로는 `ctrl_z_bg_then_second_ctrl_z_fg_restores_footer` |
 | A11 | **teardown(join/wait) 중 Ctrl-Z** | 렌더 루프가 끝나면 `SIGTSTP`를 `SIG_DFL`로 되돌림. 안 그러면 플래그 핸들러만 남아 정지도 진행도 못 하는 wedge가 됨 | ✅ `lib.rs::restore_default_suspend`, 유닛 `teardown_signal_disposition` |
 | A12 | **Ctrl-Z 동안 `cp`도 함께 정지** | Ctrl-Z는 전경 프로세스 그룹 전체에 전달되므로 `cp`도 정지 → 복사가 실제로 멈춤. 재개하면 이어서 진행(cp의 정상 동작) | 📄 |
-| A13 | **정지→재개 직후 rate/eta** | 재개 시 진행 모델의 rate 히스토리를 **비워** 실제 처리량만으로 다시 계산한다 — window가 벽시계 기준이라, 비우지 않으면 정지 구간이 "진행 0"으로 평균에 섞여 재개 후 한 window 동안 rate가 무너진다 | ✅ `progress::reset_samples` + `sampler::reset_rate_history` (#9) |
+| A13 | **정지→재개 직후 rate/eta** | 재개 시 진행 모델의 rate 히스토리를 **비워** 실제 처리량만으로 다시 계산한다 — window가 벽시계 기준이라, 비우지 않으면 정지 구간이 "진행 0"으로 평균에 섞여 재개 후 한 window 동안 rate가 무너진다. **비우는 대상은 타이밍뿐** — 파일 정체성과 `total`은 남으므로 재개 후 같은 파일의 바가 이어진다 | ✅ 모델은 `progress.rs::reset_samples_clears_the_rate_history_but_keeps_total`, 그 모델을 실제로 비우는 샘플러 배선은 `sampler.rs::reset_rate_history_clears_the_current_files_history` (#9, #53) |
 | A14 | **passthrough에서 Ctrl-Z** | 핸들러 없음 → 기본 동작으로 그룹 정지. footer가 없으므로 복구할 것도 없음 | ✅ 설계상 |
 
 ---
@@ -73,7 +73,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B5 | **`TERM` 미설정 / 빈 문자열 / `dumb`** | passthrough. 색도 함께 꺼짐 | ✅ `term::term_ok` |
 | B6 | **CI 환경(`CI` 설정)** | passthrough. **`CI=`(빈 문자열)도 CI로 간주**한다 — `var_os().is_some()` 판정이라 값은 안 본다(보수적, 의도적) | ✅ `plan.rs::ci_is_passthrough` |
 | B7 | **비-리눅스 / `/proc` 없음** | `cfg!(linux) && /proc/self/fd` 존재 확인 → 실패 시 passthrough | ✅ `term::proc_available` |
-| B8 | **`stdbuf`가 PATH에 없음 — 또는 있는지 알 수 없음** | passthrough. `stdbuf` 없이는 `-v`가 파이프에서 block-buffer돼 라이브 UI를 못 지키므로, 약속을 못 지키느니 깔끔히 포기. **탐침이 실패한 PATH 항목도 "거기엔 없다"로 친다**(`p.metadata()`가 `Err`면 `false`) — 탐색 권한이 없는 디렉터리는 건너뛰고 검색을 계속하며, 다른 디렉터리에 `stdbuf`가 있으면 정상적으로 managed로 간다. 유일한 사본이 읽을 수 없는 곳에 있을 때만 "없음"이 된다. "모르겠다"를 "있다"로 낙관하면 managed로 들어갔다가 라이브성을 못 지키므로 **보수적인 쪽이 맞다**. 대신 조용하다 — 사용자에겐 진행바가 안 뜨는 것으로만 보인다 | ✅ `term::stdbuf_available`, `tests/fallback.rs::missing_stdbuf_falls_back_to_passthrough`, 탐침 실패는 `unreadable_path_entry_reads_as_stdbuf_missing` (#51) |
+| B8 | **`stdbuf`가 PATH에 없음 — 또는 있는지 알 수 없음** | passthrough. `stdbuf` 없이는 `-v`가 파이프에서 block-buffer돼 라이브 UI를 못 지키므로, 약속을 못 지키느니 깔끔히 포기. **탐침이 실패한 PATH 항목도 "거기엔 없다"로 친다**(`p.metadata()`가 `Err`면 `false`) — 탐색 권한이 없는 디렉터리는 건너뛰고 검색을 계속하며, 다른 디렉터리에 `stdbuf`가 있으면 정상적으로 managed로 간다. 유일한 사본이 읽을 수 없는 곳에 있을 때만 "없음"이 된다. "모르겠다"를 "있다"로 낙관하면 managed로 들어갔다가 라이브성을 못 지키므로 **보수적인 쪽이 맞다**. 대신 조용하다 — 사용자에겐 진행바가 안 뜨는 것으로만 보인다. **탐침은 "정규 파일"과 "실행 비트" 둘 다를 요구한다** — `stdbuf`라는 이름의 디렉터리, 또는 실행 비트가 없는 파일은 **"없음"으로 읽고 다음 PATH 항목으로 넘어간다.** 둘 중 하나만 봐도 "있다"로 치면 managed로 들어간 뒤 spawn이 실패하고, 그건 [C7](#c7)과 달리 **cprog가 만든 실패**다 | ✅ `term::stdbuf_available`, `tests/fallback.rs::missing_stdbuf_falls_back_to_passthrough`, 탐침 실패는 `unreadable_path_entry_reads_as_stdbuf_missing` (#51), 정규 파일·실행 비트 요구는 `term.rs::the_stdbuf_probe_requires_a_regular_executable_file` (#53) |
 | B9 | **`cprog a b &`** (백그라운드 실행) | `tcgetpgrp(stdout) != getpgrp()` → `foreground=false` → passthrough. 백그라운드 작업이 터미널을 점거하면 안 되므로 | ✅ `term::is_foreground`, `tests/background.rs` (bug1 / #1) |
 | B10 | **`tcgetpgrp`이 답을 못 줌** | 두 갈래로 갈리고, 섞으면 안 된다. **① `ENOTTY`**(제어터미널이 아님 — 일반 파일 등): 백그라운드임을 *증명할 수 없으므로* 관대하게 허용(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 B9로 정상 감지되므로 관대함이 비용을 안 치른다. **② 전경 프로세스 그룹이 아예 없음**(pgid 0 — 대표적으로 **stdout이 pty master**): 이건 "모르겠다"가 아니라 **확정적으로 전경이 아니다** → `foreground=false` → passthrough. master에 footer를 쓰면 화면이 아니라 **slave 쪽 입력으로 주입**되어, 거기서 읽는 프로그램에 키 입력처럼 도착한다. `libc::tcgetpgrp`은 0을 그대로 돌려줘 pgrp 비교가 실패하는 방식으로 *우연히* 맞았고, `rustix`는 같은 상황을 `OPNOTSUPP`으로 보고하므로 **모든 에러를 ①로 뭉뚱그리면 실제 버그가 된다**(#42에서 실측·차단) | ✅ `term::is_foreground`, `term.rs::a_non_terminal_fd_is_treated_as_foreground`(①), `tests/background.rs::a_pty_master_on_stdout_is_not_a_foreground_terminal`(②) (#47, #42) |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
@@ -96,7 +96,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님). **spawn 경로에만 해당** — exec된 passthrough는 cprog가 곧 `cp`라 고아 문제가 없고, PDEATHSIG를 걸지도 않는다(걸면 `cp`의 수명이 셸에 묶여 순정과 달라짐) | ✅ `process::spawn`, `process::exec_replace`, `tests/signals.rs::killing_cprog_outright_takes_cp_with_it` (#47) |
 | C5 | **C4에서 부분 복사된 대상 파일** | `cp`는 SIGTERM에 정리를 하지 않으므로 **잘린 대상 파일이 남는다.** 이는 `cp`를 직접 죽였을 때와 동일한 결과 — 의미론 보존 | 📄 |
 | C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`; `tests/managed.rs`가 간접 증명(D7 — footer가 떴다는 것 자체가 spawn된 pid로 `cp`의 fd를 읽었다는 뜻) |
-| C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임). C1과 대칭이 아닌 지점 — 여기서 cprog 이름의 에러를 지어내면 래퍼 탓이 아닌 실패를 래퍼 탓처럼 보이게 한다 | ✅ `tests/fallback.rs::stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127` (#47) |
+| C7 | <a id="c7"></a>**`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임). C1과 대칭이 아닌 지점 — 여기서 cprog 이름의 에러를 지어내면 래퍼 탓이 아닌 실패를 래퍼 탓처럼 보이게 한다 | ✅ `tests/fallback.rs::stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127` (#47) |
 | C8 | **자식은 하나뿐** | 외부 progress 도구도 hidden PTY도 없으므로 누수될 helper 프로세스 자체가 없다 | 📄 |
 
 ---
@@ -126,14 +126,14 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E1 | **`copy_file_range`로 `fdinfo:pos`가 0** | 애초에 `pos`를 안 읽는다. 대상의 `st_size`를 읽으므로 coreutils 9.x에서도 정확 | ✅ 설계 고정, `progress-model.md` |
 | E2 | **`fallocate` 선할당으로 `st_size`가 즉시 full** | 바가 즉시 100%가 된다 — **의도적으로 수용한 한계**다. GNU `cp`엔 선할당 경로가 없어 도달할 수 없고, 이를 막으려 blocks로 재면 sparse·압축·지연할당이라는 **흔한** 경우가 모두 틀어진다(#12) | 📄 `sampler.rs::a_preallocated_destination_reads_complete_immediately` |
 | E3 | **reflink / CoW로 즉시 완료** | 첫 샘플 전에 끝나거나 100%로 점프. 정확하지만 점진적이지 않음 | 📄 |
-| E4 | **sparse 파일 / hole이 있는 원본** | `done`·`total` 둘 다 `st_size`라 hole이 많아도 **비율이 정확**하고 100%에 도달한다. 실제로 쓰인 바이트가 아니라 논리적 진행을 세므로 hole 구간에서 rate만 높게 보인다 | ✅ `sampler::FileStat::copied_bytes` (#3, #12) |
+| E4 | <a id="e4"></a>**sparse 파일 / hole이 있는 원본** | `done`·`total` 둘 다 `st_size`라 hole이 많아도 **비율이 정확**하고 100%에 도달한다. 실제로 쓰인 바이트가 아니라 논리적 진행을 세므로 hole 구간에서 rate만 높게 보인다 | ✅ `sampler::FileStat::copied_bytes` (#3, #12) |
 | E5 | **빈 원본(total = 0)** | `percent_of`가 `Some(100.0)` — 0 나누기 없음 | ✅ `progress.rs::percent_empty_source_is_complete_not_divide_by_zero` |
 | E6 | **`done > total` 오버슈트** | 100으로 clamp | ✅ `progress.rs::percent_overshoot_clamps_to_100` |
 | E7 | **두 샘플 간 증가가 0이거나 음수** | rate는 정확히 `0.0`(음수 delta는 saturating으로 0), eta는 `None`(`--:--`) | ✅ `progress.rs::rate_zero_when_no_increase`/`rate_zero_when_negative_increase` |
 | E8 | **현재 대상이 `/proc`에 없음** (파일 사이, 디렉터리 생성 중, hardlink/symlink 생성) | write fd가 없으므로 `select_current`가 `None` → 바 없음 | ✅ `proc.rs::no_write_fd_means_no_current_file` |
 | E9 | **원본이 특수파일**(fifo/device) | `RegularRead`가 아니므로 `total = None` → indeterminate(가짜 100% 금지) | ✅ `proc.rs::special_source_gives_indeterminate_total` |
 | E10 | **`/proc`/`stat` 읽기 실패** (fd 닫힘, pid 종료, 권한, hidepid) | 그 tick만 skip하고 마지막 값 유지. 크래시 없음 | ✅ `sampler.rs::dest_stat_error_skips_tick_and_keeps_model`, `proc_error_skips_tick` |
-| E11 | **stdin/stdout이 정규 파일로 리다이렉트** | `fd > 2`만 후보로 삼아 stdio를 복사 대상으로 오인하지 않음 | ✅ `proc.rs::redirected_low_fds_are_not_selected` |
+| E11 | **stdio가 정규 파일로 리다이렉트** | `fd > 2`만 후보로 삼아 stdio를 복사 대상으로 오인하지 않음. **판정은 종류가 아니라 번호로 한다** — `fd ≤ 2`는 정규 파일로 열려 있어도(쓰기든 읽기든) 후보에서 빠진다. 종류로 거르면 `2> out`처럼 stdio가 진짜 정규 파일인 순간에 규칙이 사라진다 | ✅ `proc.rs::redirected_low_fds_are_not_selected` (#53에서 정규 파일 fd 2까지 포함) |
 | E12 | **rate/eta가 아직 미지** | 샘플 2개 미만이면 `None` → `(-- MiB/s)` / `⏳ --:--`. 엉뚱한 숫자를 지어내지 않음 | ✅ `progress.rs::rate_unknown_before_two_samples` |
 | E13 | **cp가 다음 파일로 넘어감** | 대상 경로가 바뀌면 새 모델 + 새 `total`로 리셋 | ✅ `sampler.rs::new_file_resets_total` |
 | E14 | **`cp`의 기본 `--sparse=auto`가 만든 대상** | sparse 대상에서도 `st_size`로 재므로 비율이 정상적으로 100%에 도달한다 | ✅ `sampler.rs::sparse_destination_progress_reaches_completion` (#3, #12) |
@@ -141,6 +141,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E16 | **`total`과 `done`의 측정 기준 비대칭** | `total`(원본)과 `done`(대상) 모두 **`st_size`** 로 재므로 기준이 같아 비대칭이 없다 | ✅ (#3, #12) |
 | E17 | **상속된 fd가 대상으로 오인됨** | 쓰기 후보가 여럿이면 **틱 사이에 크기가 자라는 fd**를 고른다 → 셸이 물려준 fd(`3>/tmp/log`)는 자라지 않으므로 배제된다 | ✅ `sampler::choose_dest` (#6) |
 | E23 | **성장 비교용 크기 기록의 수명** | 이전 크기 기록은 **이번 틱의 후보만** 남긴다. 후보 수는 항상 한 자릿수(실제 대상 + 셸이 물려준 것 몇 개)이므로 기록도 그만큼으로 유계다. 복사한 파일 수에 비례해 쌓이면 "cprog의 메모리는 파일 개수와 무관"이라는 성질이 깨진다 — 후보가 계속 2개 이상이면 사이에 후보 없는 틱(E13)이 안 끼어 정리 기회가 없기 때문 | ✅ `sampler.rs::candidate_tracking_does_not_grow_with_the_number_of_files` (#33) |
+| E24 | **쓰기 후보 둘이 똑같이 자람** | 성장 비교가 **배타적**(`>`)이라 **먼저 온 후보를 유지**하고 동점자로 갈아타지 않는다. 동점에는 둘을 가를 정보가 없어서 어느 쪽을 고르든 근거가 없고, 그래서 중요한 것은 정답이 아니라 **결정성**이다 — 매 틱 승자가 바뀌면 바가 두 파일 사이를 오간다. 후보 순서는 `/proc/<pid>/fd` 열거 순서(사실상 fd 오름차순)이므로 같은 상황이면 같은 답이 나온다 | ✅ `sampler.rs::equal_growth_keeps_the_candidate_seen_first` (#53) |
 | E21 | **상속된 *읽기* fd가 원본으로 오인됨** | 원본을 **고른 대상 fd보다 작은 읽기 fd 중 가장 큰 것**으로 짝짓는다(`cp`는 원본을 열고 곧바로 대상을 연다) → 상속된 읽기 fd와 대상 이후에 열린 fd가 함께 배제된다 | ✅ `proc::source_for` (#11) |
 | E22 | **ext4 delayed allocation** (writeback 전 `blocks*512 < size`) | 측정 기준 판정 분기가 **없다** — 언제나 `st_size`로 재므로 지연 할당 상태와 무관하게 정확하다 | ✅ (#12) — 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | ✅ E10과 **문자 그대로 같은 분기**라 E10의 테스트가 곧 이것이다(`sampler.rs::dest_stat_error_skips_tick_and_keeps_model`). 이유만 다르고 코드가 같은 것에 테스트를 따로 두면 커버리지가 아니라 중복이다 |
@@ -156,7 +157,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F1 | **바 도중 리사이즈(SIGWINCH)** | 플래그 latch → 다음 tick에 `TIOCGWINSZ` 재조회 → 재배치 | ✅ `term::should_requery_size`, `tests/resize.rs` |
 | F2 | **SIGWINCH 유실/합쳐짐** | 1초 폴백 재조회가 있어 낡은 크기로 고정되지 않음 | ✅ `term.rs::resize_requery_rule` |
 | F3 | **터미널 높이 < 4행** | footer 억제(`rows < MIN_LOG_ROWS + FOOTER_ROWS`) — footer 2행 위에 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
-| F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림 | ✅ `ui.rs` ATTEMPTS |
+| F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림. **경계는 배타적** — 판정이 `고정폭 + 구분자 > cols`라 **폭에 정확히 들어맞는 배치는 버리지 않는다**([ui.md 예제 6](./ui.md)) | ✅ `ui.rs` ATTEMPTS, 경계는 `ui.rs::a_layout_that_exactly_fits_is_not_shed` (#53) |
 | F5 | **극단적으로 좁은 폭**(percent도 안 들어감) | 최후 수단으로 percent만 출력하며 **오버플로우를 허용**. 터미널이 줄바꿈하면 footer가 2행을 차지해 한 줄만 지우는 erase로는 잔상이 남을 수 있음 | 📄 `ui::render_footer` 주석 |
 | F6 | **렌더 중 panic** | `FooterGuard::Drop`이 unwind 중에도 footer 지우고 커서 복원 | ✅ `render.rs::drop_erases_even_on_panic` |
 | F7 | <a id="f7"></a>**`SIGKILL` / `SIGSEGV`** | 핸들러도 `Drop`도 못 돈다 → **footer 잔상 + 커서가 숨겨진 채로 터미널이 남는다.** `PDEATHSIG`로 cp는 정리되지만 화면은 사용자가 `tput cnorm` / `reset`으로 복구해야 함 | 📄 회피 불가 — `usage.md`의 `tput cnorm` 안내 (#10) |
@@ -168,6 +169,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F15 | **도달 불가 방어값 모음** | 아래는 전부 코드에 갈래가 있지만 실행 중 도달할 수 없다. 테스트를 만들어 붙이는 대신 의도적임을 여기 적는다(‑ E18과 같은 판단): ① `exit.rs`의 `status.code().unwrap_or(1)` — `Child::wait`은 signaled도 exited도 아닌 상태를 내지 않는다. ② `term::dev_ino`의 `Err` → `same_terminal_fds=false` — 유효한 `BorrowedFd`에 `fstat`은 실패하지 않는다(B4는 비교 규칙만 다룬다). ③ `proc::access_mode`에서 `flags:`가 8진수 파싱에 실패 → 그 fd는 `Other`로 분류돼 무시(E10은 *읽기* 실패만 다룬다). ④ `/proc/<pid>/fd`에 숫자 아닌 항목 → 건너뜀 — 커널이 만들지 않는다 | 📄 |
 | F16 | <a id="f16"></a>**프로덕션 코드의 `unwrap`/`expect`** | panic은 exit 101이라 **불변식 1을 깨는 유일한 방법**이다(‑ `FooterGuard::Drop`이 화면은 살리지만 exit code는 못 살린다, F6). 그래서 전부 도달 불가여야 하고 근거는 이렇다: ① `lib.rs`의 `child.stdout/stderr.take().expect(…)` — managed는 `CommandSpec::managed`가 `capture=true`로 만들어 `Stdio::piped()`를 걸므로 항상 `Some`. ② `progress.rs`의 `samples.front()/back().unwrap()` — 바로 위 `len() < 2` 가드가 통과한 뒤에만 닿는다. ③ `sampler.rs`의 `current.as_mut().expect(…)` — `is_new`가 참이면 직전에 대입했고, 거짓이면 이미 `Some`이었다는 뜻이다(`is_none_or` 판정이 그것). 새 `unwrap`/`expect`를 프로덕션에 넣을 때는 이 표에 근거를 추가한다 | 📄 |
 | F17 | **로케일 변수가 전부 미설정** (`LC_ALL`·`LC_CTYPE`·`LANG` 모두 없음) | **UTF-8로 가정한다**(`unicode_from(None) = true`). POSIX 기본값은 `C`(비-UTF-8)이므로 규격대로면 ASCII 폴백이 맞지만, 로케일은 *프로그램*에게 사용자 문자셋을 알려줄 뿐 터미널의 렌더링을 정하지 않는다 — 요즘 터미널은 `LANG`과 무관하게 UTF-8을 그린다. cron·systemd·최소 컨테이너처럼 변수가 비어 있는 환경에서 ASCII로 떨어뜨리면 멀쩡한 터미널이 손해를 본다. 반대 방향(비-UTF-8 로케일이 *명시*된 경우)은 F11대로 폴백한다 | ✅ `term::unicode_from`, `term.rs::unicode_rule` |
+| F18 | **단위 표를 넘어서는 값** (≥ 1 PiB 파일, ≥ 1 TiB/s) | 표의 **마지막 단위에서 포화**한다 — `1024.0 TiB`, `1024 GiB/s`. 단위 인덱스가 표 밖으로 걸어 나가면 인덱스 범위 초과 panic이고, panic은 exit 101이라 불변식 1을 깬다. 1 PiB는 이국적인 크기가 아니다 — `truncate -s 1P`가 sparse 파일을 즉시 만들고 cprog는 논리 길이로 재므로([E4](#e4)) 그대로 닿는다. 두 함수 다 순수 함수라 확인에 파일조차 필요 없다 | ✅ `ui.rs::size_saturates_at_the_largest_unit`, `ui.rs::rate_saturates_at_the_largest_unit` (#53) |
 | F12 | **같은 터미널에 다른 프로세스가 씀** | sole-writer 전제가 깨져 footer가 깨질 수 있음. cprog가 제어할 수 없는 영역 | 📄 |
 | F13 | **아주 오래된 터미널이 `DECTCEM`(`?25l`)을 모름** | 커서 숨김/복원 시퀀스가 그대로 화면에 보일 수 있음. `TERM` 검사는 `dumb`만 거르고 terminfo는 쓰지 않음 | 📄 |
 | F14 | **파일명 렌더**(제어문자·폭 초과) | `-v` 없이 실행하면 footer 1행이 대상 경로를 표시한다: 제어문자를 제거한 뒤 표시폭 기준으로 앞에서 자른다. 폭 초과는 미관이 아니라 **정확성** 문제다 — 줄이 접히면 2행 지우기의 커서 이동이 어긋난다 | ✅ `ui::name_row`, `ui.md` 불변식 7 (#20) |
