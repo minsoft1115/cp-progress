@@ -95,7 +95,7 @@ cp (GNU coreutils) 9.11
 ...
 Written by Torbjörn Granlund, David MacKenzie, and Jim Meyering.
 
-cprog 0.3.0 — https://github.com/minsoft1115/cp-progress
+cprog 0.4.0 — https://github.com/minsoft1115/cp-progress
 ```
 
 빈 줄 하나로 `cp` 출력과 구분하고, 색이 허용되면 흐리게(dim) 표시한다(‑ `NO_COLOR`를 존중).
