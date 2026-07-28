@@ -122,13 +122,23 @@ fn format_duration(d: Duration) -> String {
 /// of it, and dim text when colour is allowed. A horizontal rule would be the alternative and is
 /// deliberately not used — it would need the terminal width, which this path never queries, and
 /// cprog draws no decoration anywhere else.
-pub fn version_notice(informational: bool, stderr_tty: bool, color: bool) -> Option<String> {
+///
+/// Takes the whole [`Style`] for the same reason [`summary`] does: the separator is an em dash on
+/// a UTF-8 terminal and a plain hyphen otherwise. This line reaches a terminal cprog has *not*
+/// otherwise inspected — `--help`/`--version` is a passthrough, so no footer was ever laid out —
+/// which makes it the easiest glyph rule to forget (docs/ui.md "색/글리프 정책", F11).
+pub fn version_notice(informational: bool, stderr_tty: bool, style: Style) -> Option<String> {
     if !informational || !stderr_tty {
         return None;
     }
-    let line = format!("cprog {} — {}", env!("CARGO_PKG_VERSION"), env!("CARGO_PKG_REPOSITORY"));
+    let dash = if style.unicode { "—" } else { "-" };
+    let line = format!(
+        "cprog {} {dash} {}",
+        env!("CARGO_PKG_VERSION"),
+        env!("CARGO_PKG_REPOSITORY")
+    );
     // The blank line stays outside the SGR run so the escapes wrap only the text.
-    Some(format!("\n{}", colorize(line, DIM, color)))
+    Some(format!("\n{}", colorize(line, DIM, style.color)))
 }
 
 #[cfg(test)]
@@ -178,7 +188,7 @@ mod tests {
 
     #[test]
     fn version_notice_names_cprog_and_its_repository() {
-        let n = version_notice(true, true, false).expect("shown for --help/--version on a tty");
+        let n = version_notice(true, true, plain()).expect("shown for --help/--version on a tty");
         assert!(n.contains("cprog "), "names the wrapper, not cp: {n:?}");
         assert!(n.contains(env!("CARGO_PKG_VERSION")), "carries the version: {n:?}");
         assert!(n.contains("github.com"), "points somewhere useful: {n:?}");
@@ -188,14 +198,14 @@ mod tests {
     fn version_notice_is_separated_by_a_blank_line() {
         // Without it the notice reads as one more paragraph of cp's own output, which is exactly
         // what it is not.
-        let n = version_notice(true, true, false).unwrap();
+        let n = version_notice(true, true, plain()).unwrap();
         assert!(n.starts_with('\n'), "a blank line comes first: {n:?}");
         assert_eq!(n.lines().filter(|l| !l.is_empty()).count(), 1, "still one line: {n:?}");
     }
 
     #[test]
     fn version_notice_is_dim_when_colour_is_allowed() {
-        let dim = version_notice(true, true, true).unwrap();
+        let dim = version_notice(true, true, colored()).unwrap();
         assert!(dim.contains("\x1b[2m") && dim.ends_with("\x1b[0m"), "dimmed: {dim:?}");
         // The separator must sit outside the escape run, or the blank line joins the SGR span.
         assert!(dim.starts_with("\n\x1b[2m"), "escapes wrap the text only: {dim:?}");
@@ -204,22 +214,22 @@ mod tests {
     #[test]
     fn version_notice_is_plain_when_colour_is_off() {
         // NO_COLOR / TERM=dumb reach here through the same Style the summary uses.
-        let plain = version_notice(true, true, false).unwrap();
+        let plain = version_notice(true, true, plain()).unwrap();
         assert!(!plain.contains('\x1b'), "no escapes at all: {plain:?}");
     }
 
     #[test]
     fn version_notice_is_absent_for_an_ordinary_copy() {
         // Only informational invocations get it; a real copy already has the exit summary.
-        assert_eq!(version_notice(false, true, true), None);
+        assert_eq!(version_notice(false, true, colored()), None);
     }
 
     #[test]
     fn version_notice_is_absent_when_stderr_is_not_a_tty() {
         // The passthrough contract: redirected or piped output stays byte-identical to `cp`,
         // so `cp --version 2>/dev/null` and `cp --version | tail -1` are unaffected.
-        assert_eq!(version_notice(true, false, true), None);
-        assert_eq!(version_notice(false, false, false), None);
+        assert_eq!(version_notice(true, false, colored()), None);
+        assert_eq!(version_notice(false, false, plain()), None);
     }
 
     // ---- exit summary (docs/ui.md examples 4/5, runtime-model) -----------------------
@@ -255,6 +265,19 @@ mod tests {
     fn duration_formats_hours() {
         let s = summary(&ExitDisposition::Code(0), Duration::from_secs(3665), plain(), true);
         assert_eq!(s.as_deref(), Some("✓ done - 1:01:05 elapsed"));
+    }
+
+    #[test]
+    fn the_version_notice_separator_falls_back_to_ascii_too() {
+        // #31, found reviewing the summary fix: this line is emitted on a passthrough, where no
+        // footer was ever laid out, so it is the one place the glyph rule is easy to forget —
+        // and the em dash was reaching a C-locale terminal as three replacement characters.
+        let n = version_notice(true, true, ascii()).unwrap();
+        assert!(n.is_ascii(), "no glyph may reach a non-UTF-8 terminal: {n:?}");
+        assert!(n.contains(" - "), "a plain hyphen stands in for the em dash: {n:?}");
+
+        let utf8 = version_notice(true, true, plain()).unwrap();
+        assert!(utf8.contains(" — "), "UTF-8 terminals keep the em dash: {utf8:?}");
     }
 
     #[test]

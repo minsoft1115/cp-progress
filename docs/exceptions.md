@@ -157,7 +157,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F8 | **렌더/IO 실패** | best-effort. exit code 불변 | ✅ `render.rs::io_failure_is_returned_and_drop_never_panics` |
 | F9 | **로그 바이트 도착** | footer 지움 → 로그 씀 → footer 재그림(erase-redraw) | ✅ `render.rs::write_log_erases_then_writes_then_redraws` |
 | F10 | **`NO_COLOR` 설정** | 값과 무관하게 색 끔 | ✅ `term::color_from` |
-| F11 | **비-UTF-8 로케일** | 글리프를 쓰는 **모든 자리**가 함께 폴백한다: 바 `[###---]`, `⏳` 제거, 말줄임표 `...`, 종료 요약 `[ok]`/`[!]`. 하나라도 빠지면 "이 터미널은 UTF-8을 못 그린다"고 판정해놓고 UTF-8을 내보내는 셈이 된다 | ✅ `term::unicode_from`, `ui.rs::the_ellipsis_follows_the_glyph_style`, `messages.rs::summary_glyphs_fall_back_to_ascii_without_unicode` (#31) |
+| F11 | **비-UTF-8 로케일** | 글리프를 쓰는 **모든 자리**가 함께 폴백한다: 바 `[###---]`, `⏳` 제거, 말줄임표 `...`, 종료 요약 `[ok]`/`[!]`, 버전 한 줄의 구분자 `-`. 하나라도 빠지면 "이 터미널은 UTF-8을 못 그린다"고 판정해놓고 UTF-8을 내보내는 셈이 된다. 버전 한 줄은 footer를 배치하지 않는 passthrough 경로라 특히 빠뜨리기 쉽다 | ✅ `term::unicode_from`, `ui.rs::the_ellipsis_follows_the_glyph_style`, `messages.rs::summary_glyphs_fall_back_to_ascii_without_unicode`, `messages.rs::the_version_notice_separator_falls_back_to_ascii_too`, 경로 전체는 `tests/managed.rs::a_c_locale_copy_emits_nothing_outside_ascii`·`the_version_notice_is_ascii_on_a_c_locale_terminal` (#31) |
 | F12 | **같은 터미널에 다른 프로세스가 씀** | sole-writer 전제가 깨져 footer가 깨질 수 있음. cprog가 제어할 수 없는 영역 | 📄 |
 | F13 | **아주 오래된 터미널이 `DECTCEM`(`?25l`)을 모름** | 커서 숨김/복원 시퀀스가 그대로 화면에 보일 수 있음. `TERM` 검사는 `dumb`만 거르고 terminfo는 쓰지 않음 | 📄 |
 | F14 | **파일명 렌더**(제어문자·폭 초과) | `-v` 없이 실행하면 footer 1행이 대상 경로를 표시한다: 제어문자를 제거한 뒤 표시폭 기준으로 앞에서 자른다. 폭 초과는 미관이 아니라 **정확성** 문제다 — 줄이 접히면 2행 지우기의 커서 이동이 어긋난다 | ✅ `ui::name_row`, `ui.md` 불변식 7 (#20) |

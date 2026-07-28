@@ -109,7 +109,7 @@ fn dispatch(cp_args: &[OsString]) -> Result<ExitDisposition, Fatal> {
             let notice = version_notice(
                 informational && !term::passthrough_forced(),
                 io::stderr().is_terminal(),
-                term::detect_style().color,
+                term::detect_style(),
             );
             match notice {
                 Some(text) => {
