@@ -8,6 +8,7 @@
 
 use std::fs::File;
 use std::os::fd::OwnedFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -141,4 +142,84 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
     // for a failure that is not the wrapper's (C1). The exit code alone cannot tell them apart.
     assert!(!text.contains("cprog:"), "cprog must not invent a Fatal of its own: {text:?}");
     assert!(!dst.exists(), "nothing was copied");
+}
+
+#[test]
+fn unreadable_path_entry_reads_as_stdbuf_missing() {
+    // exceptions B8, the "cannot tell" half. A PATH directory without search permission makes
+    // `stdbuf` unstattable, so the probe answers false and cprog concludes it is not installed.
+    // Optimism would be worse — it would enter managed mode and then fail to keep the live-UI
+    // promise `stdbuf` exists to guarantee — but the choice is a choice, and it was not written
+    // down until now.
+    if rustix::process::geteuid().is_root() {
+        return; // root bypasses the permission bits, so there is nothing to observe
+    }
+
+    let tmp = TmpDir::new("unreadable");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 200 * 1024 * 1024]).unwrap();
+
+    // Two directories on PATH. The *only* copy of stdbuf lives in the one that gets closed off;
+    // cp lives in the readable one, so the copy can still run once cprog decides on passthrough.
+    // Appending the real PATH would defeat the test — the probe would simply find stdbuf
+    // elsewhere, which is correct behaviour and not the rule under test.
+    let hidden = tmp.0.join("hidden");
+    let plain = tmp.0.join("plain");
+    std::fs::create_dir_all(&hidden).unwrap();
+    std::fs::create_dir_all(&plain).unwrap();
+    std::os::unix::fs::symlink(find_on_path("stdbuf"), hidden.join("stdbuf")).unwrap();
+    std::os::unix::fs::symlink(find_cp(), plain.join("cp")).unwrap();
+    assert!(hidden.join("stdbuf").exists(), "precondition: stdbuf is reachable while readable");
+    let bindir = hidden;
+    std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let reachable = bindir.join("stdbuf").metadata().is_ok();
+    // Restore before any assertion can unwind, or TmpDir's cleanup fails.
+    let restore = || {
+        let _ = std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o755));
+    };
+    if reachable {
+        restore();
+        return; // some filesystems/environments ignore the mode; nothing to test then
+    }
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let path = format!("{}:{}", bindir.display(), plain.display());
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("PATH", &path)
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    let status = child.wait().unwrap();
+    restore();
+
+    assert!(status.success(), "the copy still succeeds via passthrough: {status:?}");
+    assert_eq!(std::fs::read(&dst).unwrap().len(), 200 * 1024 * 1024, "and really happened");
+    assert!(!out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]), "no bar: the probe said no stdbuf");
+    assert!(!out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]), "and no summary");
 }
