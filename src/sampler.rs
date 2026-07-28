@@ -95,6 +95,14 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
             self.candidate_sizes.clear();
             return Some(only.clone());
         }
+        // Forget candidates that are no longer open. Without this the history is only ever
+        // cleared wholesale — on a single candidate above, or on Idle — and neither is reached
+        // while an inherited write fd keeps the count above one and files follow each other
+        // closely enough to leave no gap. The map would then hold every destination the copy
+        // ever touched (#33, exceptions E18). The live candidate list is a handful of entries,
+        // so the scan is cheaper than the growth it prevents.
+        self.candidate_sizes.retain(|seen, _| dests.iter().any(|(_, path)| path == seen));
+
         let mut best: Option<(u64, (i32, PathBuf))> = None;
         for cand in dests {
             let (_, path) = cand;
@@ -431,6 +439,43 @@ mod tests {
         let st = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
         assert_eq!(st.name, "/dst/a.iso", "a stalled copy keeps its bar");
         assert_eq!(st.done, 400);
+    }
+
+    #[test]
+    fn candidate_tracking_does_not_grow_with_the_number_of_files() {
+        // #33 / exceptions E18. With a decoy write fd held open the candidate count never drops
+        // to one, and back-to-back destinations leave no gap for the Idle path to clear on. The
+        // size history must still be bounded by the live candidates, not by the files seen: at
+        // ~40 bytes a PathBuf entry, a 20,000-file recursive copy would otherwise keep every
+        // destination path it ever touched alive for the whole run.
+        let proc = FakeProc::new(vec![]);
+        let stat = FakeStat::default();
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 })); // inherited, never grows
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+
+        const FILES: usize = 200;
+        for i in 0..FILES {
+            let (src, dst) = (format!("/src/f{i}"), format!("/dst/f{i}"));
+            stat.set(&src, Ok(FileStat { size: 1000 }));
+            // Two ticks per file so the second one sees growth and can pick a winner.
+            for (n, size) in [(0u32, 100), (1, 400)] {
+                stat.set(&dst, Ok(FileStat { size }));
+                proc.set(vec![
+                    write_fd(3, "/tmp/decoy.log"),
+                    read_fd(4, &src),
+                    write_fd(5, &dst),
+                ]);
+                s.tick(t0 + Duration::from_millis((i as u64 * 2 + n as u64) * 50));
+            }
+        }
+
+        assert!(
+            s.candidate_sizes.len() <= 4,
+            "size history must stay bounded by the live candidates (2 here), got {} after \
+             {FILES} files",
+            s.candidate_sizes.len()
+        );
     }
 
     #[test]
