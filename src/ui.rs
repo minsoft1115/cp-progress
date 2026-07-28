@@ -681,6 +681,12 @@ mod tests {
     }
 
     /// Strip ANSI CSI (SGR) sequences so the visible width can be measured.
+    ///
+    /// `tests/common/mod.rs` has a near-twin for the integration suite, which cannot reach into
+    /// the crate. The difference is deliberate: that one additionally drops control characters,
+    /// because it reads raw PTY output full of `\r`, `\n` and cursor movement. Here the input is
+    /// a single composed footer row, where colour escapes are the only thing to remove — a
+    /// control character reaching this function would be the bug, not noise to filter out.
     fn strip_sgr(s: &str) -> String {
         let mut out = String::new();
         let mut chars = s.chars().peekable();
