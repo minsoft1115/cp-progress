@@ -21,6 +21,9 @@
 
 1. **`cp`의 결과가 최종 권위.** cprog 쪽 실패(캡처·렌더·샘플·정리)는 절대 `cp`의 exit
    code/시그널을 바꾸지 않는다. 코드로는 무음 best-effort(`let _ = …`)로 표현된다.
+   **panic만은 예외가 될 수 있다** — panic은 exit 101이라 `cp`의 결과를 덮는다. 그래서
+   프로덕션 코드의 `unwrap`/`expect`는 전부 도달 불가여야 하고, 그 근거를 [F16](#f16)에
+   전수로 적어둔다.
 2. **터미널은 어떤 경로로 끝나도 복구된다.** 정상 종료·`Fatal`·panic·시그널·Ctrl-Z —
    `FooterGuard::Drop`(및 `suspend_restore`)이 footer를 지우고 커서를 되살린다.
    **단 하나의 예외는 SIGKILL/SIGSEGV**(→ [F7](#f7)).
@@ -70,7 +73,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B5 | **`TERM` 미설정 / 빈 문자열 / `dumb`** | passthrough. 색도 함께 꺼짐 | ✅ `term::term_ok` |
 | B6 | **CI 환경(`CI` 설정)** | passthrough. **`CI=`(빈 문자열)도 CI로 간주**한다 — `var_os().is_some()` 판정이라 값은 안 본다(보수적, 의도적) | ✅ `plan.rs::ci_is_passthrough` |
 | B7 | **비-리눅스 / `/proc` 없음** | `cfg!(linux) && /proc/self/fd` 존재 확인 → 실패 시 passthrough | ✅ `term::proc_available` |
-| B8 | **`stdbuf`가 PATH에 없음** | passthrough. `stdbuf` 없이는 `-v`가 파이프에서 block-buffer돼 라이브 UI를 못 지키므로, 약속을 못 지키느니 깔끔히 포기 | ✅ `term::stdbuf_available`, `tests/fallback.rs::missing_stdbuf_falls_back_to_passthrough` |
+| B8 | **`stdbuf`가 PATH에 없음 — 또는 있는지 알 수 없음** | passthrough. `stdbuf` 없이는 `-v`가 파이프에서 block-buffer돼 라이브 UI를 못 지키므로, 약속을 못 지키느니 깔끔히 포기. **탐침이 실패한 PATH 항목도 "거기엔 없다"로 친다**(`p.metadata()`가 `Err`면 `false`) — 탐색 권한이 없는 디렉터리는 건너뛰고 검색을 계속하며, 다른 디렉터리에 `stdbuf`가 있으면 정상적으로 managed로 간다. 유일한 사본이 읽을 수 없는 곳에 있을 때만 "없음"이 된다. "모르겠다"를 "있다"로 낙관하면 managed로 들어갔다가 라이브성을 못 지키므로 **보수적인 쪽이 맞다**. 대신 조용하다 — 사용자에겐 진행바가 안 뜨는 것으로만 보인다 | ✅ `term::stdbuf_available`, `tests/fallback.rs::missing_stdbuf_falls_back_to_passthrough`, 탐침 실패는 `unreadable_path_entry_reads_as_stdbuf_missing` (#51) |
 | B9 | **`cprog a b &`** (백그라운드 실행) | `tcgetpgrp(stdout) != getpgrp()` → `foreground=false` → passthrough. 백그라운드 작업이 터미널을 점거하면 안 되므로 | ✅ `term::is_foreground`, `tests/background.rs` (bug1 / #1) |
 | B10 | **`tcgetpgrp`이 답을 못 줌** | 두 갈래로 갈리고, 섞으면 안 된다. **① `ENOTTY`**(제어터미널이 아님 — 일반 파일 등): 백그라운드임을 *증명할 수 없으므로* 관대하게 허용(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 B9로 정상 감지되므로 관대함이 비용을 안 치른다. **② 전경 프로세스 그룹이 아예 없음**(pgid 0 — 대표적으로 **stdout이 pty master**): 이건 "모르겠다"가 아니라 **확정적으로 전경이 아니다** → `foreground=false` → passthrough. master에 footer를 쓰면 화면이 아니라 **slave 쪽 입력으로 주입**되어, 거기서 읽는 프로그램에 키 입력처럼 도착한다. `libc::tcgetpgrp`은 0을 그대로 돌려줘 pgrp 비교가 실패하는 방식으로 *우연히* 맞았고, `rustix`는 같은 상황을 `OPNOTSUPP`으로 보고하므로 **모든 에러를 ①로 뭉뚱그리면 실제 버그가 된다**(#42에서 실측·차단) | ✅ `term::is_foreground`, `term.rs::a_non_terminal_fd_is_treated_as_foreground`(①), `tests/background.rs::a_pty_master_on_stdout_is_not_a_foreground_terminal`(②) (#47, #42) |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
@@ -161,6 +164,10 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F9 | **로그 바이트 도착** | footer 지움 → 로그 씀 → footer 재그림(erase-redraw) | ✅ `render.rs::write_log_erases_then_writes_then_redraws` |
 | F10 | **`NO_COLOR` 설정** | 값과 무관하게 색 끔 | ✅ `term::color_from` |
 | F11 | **비-UTF-8 로케일** | 글리프를 쓰는 **모든 자리**가 함께 폴백한다: 바 `[###---]`, `⏳` 제거, 말줄임표 `...`, 종료 요약 `[ok]`/`[!]`, 버전 한 줄의 구분자 `-`. 하나라도 빠지면 "이 터미널은 UTF-8을 못 그린다"고 판정해놓고 UTF-8을 내보내는 셈이 된다. 버전 한 줄은 footer를 배치하지 않는 passthrough 경로라 특히 빠뜨리기 쉽다 | ✅ `term::unicode_from`, `ui.rs::the_ellipsis_follows_the_glyph_style`, `messages.rs::summary_glyphs_fall_back_to_ascii_without_unicode`, `messages.rs::the_version_notice_separator_falls_back_to_ascii_too`, 경로 전체는 `tests/managed.rs::a_c_locale_copy_emits_nothing_outside_ascii`·`the_version_notice_is_ascii_on_a_c_locale_terminal` (#31) |
+| F14 | <a id="f14"></a>**크기 조회 실패 / 폭 0** (`TIOCGWINSZ`가 에러이거나 `ws_col == 0` — 크기가 설정된 적 없는 pty가 대표적) | **80×24로 배치한다.** 초기값이 그대로 남고, 조회가 한 번이라도 성공하면 그 값으로 갱신된 뒤 유지된다. 리사이즈를 한 번 건너뛰는 게 아니라 **실행 내내 80칸 기준**이라는 점이 중요하다. 터미널이 실제로 더 좁으면 [ui.md 불변식 7](./ui.md)이 깨진다(줄 접힘 → 2행 erase 어긋남). 폭을 알 수 없을 때 footer를 아예 포기하는 선택지도 있었지만, 크기를 못 주는 터미널은 드물고 그때마다 진행바를 버리는 대가가 더 크다고 봤다 | ✅ `term::terminal_size`, `tests/resize.rs::an_unsized_terminal_is_laid_out_as_eighty_columns` (#50, #51) |
+| F15 | **도달 불가 방어값 모음** | 아래는 전부 코드에 갈래가 있지만 실행 중 도달할 수 없다. 테스트를 만들어 붙이는 대신 의도적임을 여기 적는다(‑ E18과 같은 판단): ① `exit.rs`의 `status.code().unwrap_or(1)` — `Child::wait`은 signaled도 exited도 아닌 상태를 내지 않는다. ② `term::dev_ino`의 `Err` → `same_terminal_fds=false` — 유효한 `BorrowedFd`에 `fstat`은 실패하지 않는다(B4는 비교 규칙만 다룬다). ③ `proc::access_mode`에서 `flags:`가 8진수 파싱에 실패 → 그 fd는 `Other`로 분류돼 무시(E10은 *읽기* 실패만 다룬다). ④ `/proc/<pid>/fd`에 숫자 아닌 항목 → 건너뜀 — 커널이 만들지 않는다 | 📄 |
+| F16 | <a id="f16"></a>**프로덕션 코드의 `unwrap`/`expect`** | panic은 exit 101이라 **불변식 1을 깨는 유일한 방법**이다(‑ `FooterGuard::Drop`이 화면은 살리지만 exit code는 못 살린다, F6). 그래서 전부 도달 불가여야 하고 근거는 이렇다: ① `lib.rs`의 `child.stdout/stderr.take().expect(…)` — managed는 `CommandSpec::managed`가 `capture=true`로 만들어 `Stdio::piped()`를 걸므로 항상 `Some`. ② `progress.rs`의 `samples.front()/back().unwrap()` — 바로 위 `len() < 2` 가드가 통과한 뒤에만 닿는다. ③ `sampler.rs`의 `current.as_mut().expect(…)` — `is_new`가 참이면 직전에 대입했고, 거짓이면 이미 `Some`이었다는 뜻이다(`is_none_or` 판정이 그것). 새 `unwrap`/`expect`를 프로덕션에 넣을 때는 이 표에 근거를 추가한다 | 📄 |
+| F17 | **로케일 변수가 전부 미설정** (`LC_ALL`·`LC_CTYPE`·`LANG` 모두 없음) | **UTF-8로 가정한다**(`unicode_from(None) = true`). POSIX 기본값은 `C`(비-UTF-8)이므로 규격대로면 ASCII 폴백이 맞지만, 로케일은 *프로그램*에게 사용자 문자셋을 알려줄 뿐 터미널의 렌더링을 정하지 않는다 — 요즘 터미널은 `LANG`과 무관하게 UTF-8을 그린다. cron·systemd·최소 컨테이너처럼 변수가 비어 있는 환경에서 ASCII로 떨어뜨리면 멀쩡한 터미널이 손해를 본다. 반대 방향(비-UTF-8 로케일이 *명시*된 경우)은 F11대로 폴백한다 | ✅ `term::unicode_from`, `term.rs::unicode_rule` |
 | F12 | **같은 터미널에 다른 프로세스가 씀** | sole-writer 전제가 깨져 footer가 깨질 수 있음. cprog가 제어할 수 없는 영역 | 📄 |
 | F13 | **아주 오래된 터미널이 `DECTCEM`(`?25l`)을 모름** | 커서 숨김/복원 시퀀스가 그대로 화면에 보일 수 있음. `TERM` 검사는 `dumb`만 거르고 terminfo는 쓰지 않음 | 📄 |
 | F14 | **파일명 렌더**(제어문자·폭 초과) | `-v` 없이 실행하면 footer 1행이 대상 경로를 표시한다: 제어문자를 제거한 뒤 표시폭 기준으로 앞에서 자른다. 폭 초과는 미관이 아니라 **정확성** 문제다 — 줄이 접히면 2행 지우기의 커서 이동이 어긋난다 | ✅ `ui::name_row`, `ui.md` 불변식 7 (#20) |
