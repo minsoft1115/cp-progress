@@ -99,7 +99,7 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
         // cleared wholesale — on a single candidate above, or on Idle — and neither is reached
         // while an inherited write fd keeps the count above one and files follow each other
         // closely enough to leave no gap. The map would then hold every destination the copy
-        // ever touched (#33, exceptions E18). The live candidate list is a handful of entries,
+        // ever touched (#33, exceptions E23). The live candidate list is a handful of entries,
         // so the scan is cheaper than the growth it prevents.
         self.candidate_sizes.retain(|seen, _| dests.iter().any(|(_, path)| path == seen));
 
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn candidate_tracking_does_not_grow_with_the_number_of_files() {
-        // #33 / exceptions E18. With a decoy write fd held open the candidate count never drops
+        // #33 / exceptions E23. With a decoy write fd held open the candidate count never drops
         // to one, and back-to-back destinations leave no gap for the Idle path to clear on. The
         // size history must still be bounded by the live candidates, not by the files seen: at
         // ~40 bytes a PathBuf entry, a 20,000-file recursive copy would otherwise keep every

@@ -137,7 +137,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E15 | **압축/inline 파일시스템**(btrfs `compress`, ZFS) 또는 `st_blocks`를 0으로 보고하는 FS | `st_blocks`를 아예 보지 않으므로 영향받지 않는다 | ✅ (#3, #12) — size만 보므로 영향 없음 |
 | E16 | **`total`과 `done`의 측정 기준 비대칭** | `total`(원본)과 `done`(대상) 모두 **`st_size`** 로 재므로 기준이 같아 비대칭이 없다 | ✅ (#3, #12) |
 | E17 | **상속된 fd가 대상으로 오인됨** | 쓰기 후보가 여럿이면 **틱 사이에 크기가 자라는 fd**를 고른다 → 셸이 물려준 fd(`3>/tmp/log`)는 자라지 않으므로 배제된다 | ✅ `sampler::choose_dest` (#6) |
-| E18 | **성장 비교용 크기 기록의 수명** | 이전 크기 기록은 **이번 틱의 후보만** 남긴다. 후보 수는 항상 한 자릿수(실제 대상 + 셸이 물려준 것 몇 개)이므로 기록도 그만큼으로 유계다. 복사한 파일 수에 비례해 쌓이면 "cprog의 메모리는 파일 개수와 무관"이라는 성질이 깨진다 — 후보가 계속 2개 이상이면 사이에 후보 없는 틱(E13)이 안 끼어 정리 기회가 없기 때문 | ✅ `sampler.rs::candidate_tracking_does_not_grow_with_the_number_of_files` (#33) |
+| E23 | **성장 비교용 크기 기록의 수명** | 이전 크기 기록은 **이번 틱의 후보만** 남긴다. 후보 수는 항상 한 자릿수(실제 대상 + 셸이 물려준 것 몇 개)이므로 기록도 그만큼으로 유계다. 복사한 파일 수에 비례해 쌓이면 "cprog의 메모리는 파일 개수와 무관"이라는 성질이 깨진다 — 후보가 계속 2개 이상이면 사이에 후보 없는 틱(E13)이 안 끼어 정리 기회가 없기 때문 | ✅ `sampler.rs::candidate_tracking_does_not_grow_with_the_number_of_files` (#33) |
 | E21 | **상속된 *읽기* fd가 원본으로 오인됨** | 원본을 **고른 대상 fd보다 작은 읽기 fd 중 가장 큰 것**으로 짝짓는다(`cp`는 원본을 열고 곧바로 대상을 연다) → 상속된 읽기 fd와 대상 이후에 열린 fd가 함께 배제된다 | ✅ `proc::source_for` (#11) |
 | E22 | **ext4 delayed allocation** (writeback 전 `blocks*512 < size`) | 측정 기준 판정 분기가 **없다** — 언제나 `st_size`로 재므로 지연 할당 상태와 무관하게 정확하다 | ✅ (#12) — 항상 `st_size` |
 | E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
