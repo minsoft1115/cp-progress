@@ -384,7 +384,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         .wait()
         .map_err(|e| Fatal::CpWait { pid, source: e.to_string() })?;
     let disp = disposition(status);
-    if let Some(line) = summary(&disp, start.elapsed(), style.color, progress_shown) {
+    if let Some(line) = summary(&disp, start.elapsed(), style, progress_shown) {
         // Best-effort, same rationale as the Fatal path: never let a stderr write failure panic.
         let _ = writeln!(io::stderr(), "{line}");
     }

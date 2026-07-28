@@ -10,6 +10,7 @@ use std::fmt;
 use std::time::Duration;
 
 use crate::exit::ExitDisposition;
+use crate::ui::Style;
 
 /// A fatal problem that stops cprog before/around running `cp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,24 +57,31 @@ impl fmt::Display for Fatal {
 /// e.g. `--help`, an instant success/failure), there is no summary at all. Otherwise a signaled
 /// `cp` still gets none (signal semantics win); success is `✓ done - T elapsed`; a non-zero exit
 /// is stated neutrally as `✗ cp exited n - T elapsed` (cp's own stderr, relayed above, explains
-/// why). With `color`, success is green and failure red (docs/ui.md "색/글리프 정책").
+/// why).
+///
+/// [`Style`] drives two independent axes (docs/ui.md "색/글리프 정책"). Colour — from `TERM` and
+/// `NO_COLOR` — paints success green and failure red. Glyphs — from the locale — decide the
+/// marker: `✓`/`✗` on a UTF-8 terminal, `[ok]`/`[!]` otherwise, matching the bar's own
+/// `[###---]` fallback. The marker has to follow the same rule as the bar; a terminal cprog has
+/// already judged unable to render UTF-8 must not be handed a `✓` on the way out (#31, F11).
 pub fn summary(
     disp: &ExitDisposition,
     elapsed: Duration,
-    color: bool,
+    style: Style,
     progress_shown: bool,
 ) -> Option<String> {
     if !progress_shown {
         return None;
     }
     let t = format_duration(elapsed);
+    let (ok, bad) = if style.unicode { ("✓", "✗") } else { ("[ok]", "[!]") };
     match disp {
         ExitDisposition::Signal(_) => None,
         ExitDisposition::Code(0) => {
-            Some(colorize(format!("✓ done - {t} elapsed"), "\x1b[32m", color)) // green
+            Some(colorize(format!("{ok} done - {t} elapsed"), "\x1b[32m", style.color)) // green
         }
         ExitDisposition::Code(n) => {
-            Some(colorize(format!("✗ cp exited {n} - {t} elapsed"), "\x1b[31m", color)) // red
+            Some(colorize(format!("{bad} cp exited {n} - {t} elapsed"), "\x1b[31m", style.color)) // red
         }
     }
 }
@@ -128,6 +136,19 @@ mod tests {
     use super::*;
     use crate::exit::ExitDisposition;
     use std::time::Duration;
+
+    /// UTF-8 glyphs, no colour — the baseline the wording assertions use.
+    fn plain() -> Style {
+        Style { color: false, unicode: true }
+    }
+    /// UTF-8 glyphs with colour.
+    fn colored() -> Style {
+        Style { color: true, unicode: true }
+    }
+    /// A terminal whose locale is not UTF-8 (LC_ALL=C): no glyphs, no colour.
+    fn ascii() -> Style {
+        Style { color: false, unicode: false }
+    }
 
     // ---- fatals (block execution, non-zero exit) -------------------------------------
 
@@ -207,40 +228,63 @@ mod tests {
     fn no_summary_without_progress() {
         // The general gate: if the footer never engaged (e.g. --help, an instant exit), cp did
         // nothing worth summarizing -> stay quiet, whatever the exit code.
-        assert_eq!(summary(&ExitDisposition::Code(0), Duration::from_secs(1), false, false), None);
-        assert_eq!(summary(&ExitDisposition::Code(1), Duration::from_secs(1), false, false), None);
+        assert_eq!(summary(&ExitDisposition::Code(0), Duration::from_secs(1), plain(), false), None);
+        assert_eq!(summary(&ExitDisposition::Code(1), Duration::from_secs(1), plain(), false), None);
     }
 
     #[test]
     fn no_summary_on_signal() {
         // docs/runtime-model.md: a signaled cp gets no summary (preserve signal semantics).
-        assert_eq!(summary(&ExitDisposition::Signal(2), Duration::from_secs(14), false, true), None);
+        assert_eq!(summary(&ExitDisposition::Signal(2), Duration::from_secs(14), plain(), true), None);
     }
 
     #[test]
     fn success_summary() {
-        let s = summary(&ExitDisposition::Code(0), Duration::from_secs(14), false, true);
+        let s = summary(&ExitDisposition::Code(0), Duration::from_secs(14), plain(), true);
         assert_eq!(s.as_deref(), Some("✓ done - 00:14 elapsed"));
     }
 
     #[test]
     fn failure_summary_states_exit_code_and_elapsed() {
         // Neutral wording: cp exited with a code (not editorialized as "failed"), plus elapsed.
-        let s = summary(&ExitDisposition::Code(1), Duration::from_secs(3), false, true);
+        let s = summary(&ExitDisposition::Code(1), Duration::from_secs(3), plain(), true);
         assert_eq!(s.as_deref(), Some("✗ cp exited 1 - 00:03 elapsed"));
     }
 
     #[test]
     fn duration_formats_hours() {
-        let s = summary(&ExitDisposition::Code(0), Duration::from_secs(3665), false, true);
+        let s = summary(&ExitDisposition::Code(0), Duration::from_secs(3665), plain(), true);
         assert_eq!(s.as_deref(), Some("✓ done - 1:01:05 elapsed"));
     }
 
     #[test]
+    fn summary_glyphs_fall_back_to_ascii_without_unicode() {
+        // #31 / exceptions F11. On LC_ALL=C the bar already renders as [###---], the ⏳ is gone
+        // and the ellipsis is "...". Emitting ✓/✗ here contradicts that judgement on the one line
+        // that is guaranteed to be printed.
+        let ok = summary(&ExitDisposition::Code(0), Duration::from_secs(14), ascii(), true).unwrap();
+        assert_eq!(ok, "[ok] done - 00:14 elapsed");
+        let bad = summary(&ExitDisposition::Code(1), Duration::from_secs(3), ascii(), true).unwrap();
+        assert_eq!(bad, "[!] cp exited 1 - 00:03 elapsed");
+        for line in [&ok, &bad] {
+            assert!(line.is_ascii(), "nothing outside ASCII may reach this terminal: {line:?}");
+        }
+    }
+
+    #[test]
+    fn glyph_fallback_is_independent_of_colour() {
+        // Two separate axes: colour comes from TERM/NO_COLOR, glyphs from the locale. A colour
+        // terminal on a C locale must still get ASCII markers, wrapped in SGR.
+        let s = Style { color: true, unicode: false };
+        let line = summary(&ExitDisposition::Code(0), Duration::from_secs(1), s, true).unwrap();
+        assert_eq!(line, "\x1b[32m[ok] done - 00:01 elapsed\x1b[0m");
+    }
+
+    #[test]
     fn color_wraps_success_green_and_failure_red() {
-        let ok = summary(&ExitDisposition::Code(0), Duration::from_secs(1), true, true).unwrap();
+        let ok = summary(&ExitDisposition::Code(0), Duration::from_secs(1), colored(), true).unwrap();
         assert!(ok.starts_with("\x1b[32m") && ok.ends_with("\x1b[0m"), "green: {ok:?}");
-        let bad = summary(&ExitDisposition::Code(1), Duration::from_secs(1), true, true).unwrap();
+        let bad = summary(&ExitDisposition::Code(1), Duration::from_secs(1), colored(), true).unwrap();
         assert!(bad.starts_with("\x1b[31m") && bad.ends_with("\x1b[0m"), "red: {bad:?}");
     }
 }
