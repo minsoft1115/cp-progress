@@ -426,8 +426,19 @@ const RELAY_QUEUE_DEPTH: usize = 64;
 
 /// Read a millisecond duration from an env var, falling back to `default_ms`.
 fn env_ms(var: &str, default_ms: u64) -> Duration {
-    let ms = std::env::var(var).ok().and_then(|s| s.parse::<u64>().ok()).unwrap_or(default_ms);
-    Duration::from_millis(ms)
+    ms_or_default(std::env::var(var).ok().as_deref(), default_ms)
+}
+
+/// The rule behind [`env_ms`], split out so it can be tested without touching the environment
+/// (`std::env::set_var` is `unsafe` in edition 2024 and would race the other tests anyway).
+///
+/// Anything that is not a plain non-negative integer — a typo, a unit suffix, a negative, an
+/// empty value — falls back to the default **silently** (docs/exceptions.md H1). Warning would
+/// mean cprog writing a line `cp` would not have written, on the one hand, and on the other the
+/// consequence of the fallback is a timing knob reverting to its documented default, which is
+/// not something a user needs to act on.
+fn ms_or_default(raw: Option<&str>, default_ms: u64) -> Duration {
+    Duration::from_millis(raw.and_then(|s| s.parse::<u64>().ok()).unwrap_or(default_ms))
 }
 
 /// Restore `SIGTSTP` (Ctrl-Z) to its default disposition after the managed render loop ends.
@@ -441,6 +452,40 @@ fn restore_default_suspend() {
     // SAFETY: resetting a signal to its default disposition is a valid, async-signal-safe call.
     unsafe {
         libc::signal(SIGTSTP, libc::SIG_DFL);
+    }
+}
+
+#[cfg(test)]
+mod env_knobs {
+    use super::*;
+
+    /// H1: anything that is not a plain non-negative integer falls back, and does so silently.
+    /// The knobs are undocumented-ish timing controls, so a typo must not change behaviour in a
+    /// way the user cannot see — it reverts to the documented default and says nothing.
+    #[test]
+    fn a_non_numeric_knob_falls_back_to_its_default() {
+        for bad in ["", "abc", "100ms", "-1", "1.5", " 100", "100 ", "0x64", "٤٢"] {
+            assert_eq!(
+                ms_or_default(Some(bad), 125),
+                Duration::from_millis(125),
+                "{bad:?} is not a plain integer and must fall back"
+            );
+        }
+        assert_eq!(ms_or_default(None, 125), Duration::from_millis(125), "unset falls back too");
+    }
+
+    #[test]
+    fn a_numeric_knob_is_taken_verbatim() {
+        assert_eq!(ms_or_default(Some("0"), 125), Duration::ZERO, "H2: zero is a real value");
+        assert_eq!(ms_or_default(Some("1"), 125), Duration::from_millis(1));
+        assert_eq!(ms_or_default(Some("60000"), 125), Duration::from_millis(60_000));
+    }
+
+    #[test]
+    fn an_overflowing_knob_falls_back_rather_than_wrapping() {
+        // u64::MAX + 1: parse fails, so it reverts to the default instead of wrapping into a
+        // small — and silently wrong — duration.
+        assert_eq!(ms_or_default(Some("18446744073709551616"), 125), Duration::from_millis(125));
     }
 }
 

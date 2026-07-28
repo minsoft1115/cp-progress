@@ -249,6 +249,40 @@ mod tests {
         assert!(inspect(&args(&["--reflink=auto", "--help"])).unwrap().informational);
     }
 
+    // ---- non-UTF-8 arguments (G8) ----------------------------------------------------
+
+    #[test]
+    fn a_non_utf8_operand_does_not_stop_the_scan() {
+        // exceptions G8. A path that is not valid UTF-8 is legal on Linux, and the scan must
+        // still answer both of its questions with one in the vector — an ArgError::Scan here
+        // would drop a perfectly ordinary copy to passthrough and take the progress bar with
+        // it, exactly the shape of #30.
+        //
+        // This is asserted on `inspect` rather than end-to-end on purpose: with stdout not a
+        // terminal every path leads to passthrough, so the two are indistinguishable from the
+        // outside. An integration test of this rule passes whether or not the scan works.
+        use std::os::unix::ffi::OsStrExt;
+        let bad = OsString::from(std::ffi::OsStr::from_bytes(b"src-\xFF.bin"));
+        let dst = OsString::from(std::ffi::OsStr::from_bytes(b"dst-\xFF.bin"));
+        assert!(bad.to_str().is_none(), "precondition: not representable as UTF-8");
+
+        let i = inspect(&[bad.clone(), dst.clone()])
+            .unwrap_or_else(|e| panic!("a non-UTF-8 operand must scan clean, got {e:?}"));
+        assert!(!i.interactive && !i.verbose && !i.informational);
+
+        let i = inspect(&[OsString::from("-v"), bad.clone(), dst.clone()]).unwrap();
+        assert!(i.verbose, "`-v` is still seen alongside an unrepresentable operand");
+
+        let i = inspect(&[OsString::from("-i"), bad.clone(), dst.clone()]).unwrap();
+        assert!(i.interactive, "`-i` is still seen, so passthrough is still forced");
+
+        // The bytes are the *option* rather than the operand: lexopt sees a non-UTF-8 long
+        // option, which is not one of ours, so it is ignored and handed to cp.
+        let weird = OsString::from(std::ffi::OsStr::from_bytes(b"--opt-\xFF"));
+        let i = inspect(&[weird, OsString::from("-v"), bad, dst]).unwrap();
+        assert!(i.verbose, "a flag after an unrepresentable option is still seen");
+    }
+
     // ---- scan failure -> conservative passthrough ------------------------------------
 
     #[test]

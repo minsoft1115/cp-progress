@@ -339,3 +339,138 @@ fn cp_killed_by_a_realtime_signal_still_exits_cprog_signaled() {
         128 + rtmin
     );
 }
+
+#[test]
+fn killing_cprog_outright_takes_cp_with_it() {
+    // exceptions C4. PR_SET_PDEATHSIG(SIGTERM) is the only thing standing between a dead cprog
+    // and an orphaned `cp` still writing to the destination. It is set inside a `pre_exec`
+    // whose error is deliberately swallowed — a copy is not worth aborting over it — so if it
+    // ever stopped being applied, nothing would say so.
+    //
+    // SIGKILL on purpose: it is the one signal cprog cannot handle, so no teardown of ours runs
+    // and the kernel's death signal is genuinely all that is left.
+    let tmp = TmpDir::new("pdeath");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&fifo)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+    let cprog_pid = child.id() as i32;
+
+    // Open the write end so cp gets past open() and blocks on read with nothing coming.
+    let writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut cp_pid = None;
+    while cp_pid.is_none() && std::time::Instant::now() < deadline {
+        cp_pid = cp_child_of(cprog_pid);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let cp_pid = cp_pid.expect("cp never appeared as cprog's child");
+
+    kill(Pid::from_raw(cprog_pid), Signal::SIGKILL).unwrap();
+    let _ = child.wait();
+
+    // cp is not our child, so poll /proc rather than wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut gone = false;
+    while std::time::Instant::now() < deadline {
+        if !std::path::Path::new(&format!("/proc/{cp_pid}")).exists() {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    drop(writer);
+    if !gone {
+        // Do not leave a stray cp blocked on the FIFO behind a failing test.
+        let _ = kill(Pid::from_raw(cp_pid), Signal::SIGKILL);
+    }
+    assert!(gone, "cp {cp_pid} outlived a SIGKILLed cprog — PR_SET_PDEATHSIG is not taking");
+}
+
+#[test]
+fn a_signal_cprog_does_not_register_keeps_its_default_action() {
+    // exceptions A4: only SIGINT/TERM/HUP/QUIT are caught; everything else keeps the kernel
+    // default. SIGUSR1 terminates, so cprog dies of it *without* running any teardown — the
+    // footer and the hidden cursor are left on screen, exactly as in F7. That is the accepted
+    // consequence of not catching every signal, and it is asserted here so "cprog cleans up on
+    // any signal" cannot be assumed by mistake.
+    let tmp = TmpDir::new("usr1");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+    let cprog_pid = Pid::from_raw(child.id() as i32);
+
+    let bar: [u8; 3] = [0xE2, 0x96, 0x88]; // █
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut signaled = false;
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => {
+                out.extend_from_slice(&buf[..n]);
+                // Only once the footer is up, so the teardown that does *not* happen is the
+                // teardown that would otherwise have had something to clear.
+                if !signaled && out.windows(3).any(|w| w == bar) {
+                    kill(cprog_pid, Signal::SIGUSR1).unwrap();
+                    signaled = true;
+                }
+            }
+        }
+    }
+    let status = child.wait().unwrap();
+
+    assert!(signaled, "footer never appeared, so nothing was exercised");
+    assert_eq!(
+        status.signal(),
+        Some(Signal::SIGUSR1 as i32),
+        "an unregistered signal keeps its default action — cprog neither catches nor relays it"
+    );
+    let last_bar = rfind(&out, &bar).expect("saw a bar");
+    assert!(
+        !out[last_bar + bar.len()..].windows(4).any(|w| w == b"\r\x1b[K"),
+        "no teardown erase is expected here: dying of an uncaught signal leaves the footer up"
+    );
+}

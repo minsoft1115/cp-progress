@@ -206,3 +206,65 @@ fn informational_output_stays_byte_identical_when_not_a_terminal() {
         );
     }
 }
+
+#[test]
+fn a_non_utf8_argument_reaches_cp_unchanged() {
+    // exceptions G8. cprog scans the argument vector with lexopt but never rebuilds it — the
+    // original `OsString`s go to `cp`. A path that is not valid UTF-8 is legal on Linux, so
+    // this is not a curiosity: lossy handling anywhere in the scan would corrupt a real file
+    // name, and the passthrough contract says the outcome must be `cp`'s, byte for byte.
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = TmpDir::new("nonutf8");
+    // 0xFF is not valid UTF-8 in any position.
+    let name = OsStr::from_bytes(b"src-\xFF-name.bin");
+    let src = tmp.0.join(name);
+    let dst = tmp.0.join(OsStr::from_bytes(b"dst-\xFF-name.bin"));
+    std::fs::write(&src, b"payload").unwrap();
+    assert!(src.to_str().is_none(), "precondition: the path is not representable as UTF-8");
+
+    let ours = cprog([src.as_os_str(), dst.as_os_str()]);
+    assert_eq!(ours.status.code(), Some(0), "stderr={:?}", String::from_utf8_lossy(&ours.stderr));
+    assert_eq!(std::fs::read(&dst).unwrap(), b"payload", "the copy landed at the exact name");
+    assert!(ours.stdout.is_empty() && ours.stderr.is_empty(), "a plain copy says nothing");
+
+    // And the failing shape: cp's own diagnosis must come through unaltered, which is where a
+    // lossy round-trip of the name would show up.
+    let missing = tmp.0.join(OsStr::from_bytes(b"missing-\xFF.bin"));
+    let ours = cprog([missing.as_os_str(), dst.as_os_str()]);
+    let theirs = cp([missing.as_os_str(), dst.as_os_str()]);
+    assert_eq!(ours.status.code(), theirs.status.code());
+    assert_eq!(ours.stdout, theirs.stdout);
+    // `cp` escapes the byte in its own message (`$'\377'`), so the assertion is byte-identity
+    // with cp — not the presence of a raw 0xFF, which cp never emits. Non-emptiness keeps the
+    // comparison from passing vacuously.
+    assert!(!theirs.stderr.is_empty(), "cp did diagnose the missing file");
+    assert_eq!(ours.stderr, theirs.stderr, "cp's message, byte for byte");
+}
+
+#[test]
+fn a_non_utf8_name_in_a_verbose_line_matches_cp_exactly() {
+    // exceptions G8, the `-v` shape: the name has to survive as bytes all the way into cp's own
+    // output line.
+    //
+    // Deliberately *not* named after the flag scan. Stdout is not a terminal here, so managed
+    // and passthrough are indistinguishable from the outside and this would pass whether or not
+    // the scan saw `-v` at all — verified by mutation. That claim is asserted where it is
+    // actually observable: `args.rs::a_non_utf8_operand_does_not_stop_the_scan`.
+    use std::os::unix::ffi::OsStrExt;
+
+    let tmp = TmpDir::new("nonutf8flags");
+    let src = tmp.0.join(OsStr::from_bytes(b"s-\xFF.bin"));
+    let dst = tmp.0.join(OsStr::from_bytes(b"d-\xFF.bin"));
+    std::fs::write(&src, b"x").unwrap();
+
+    let ours = cprog([OsStr::new("-v"), src.as_os_str(), dst.as_os_str()]);
+    let theirs = cp([OsStr::new("-v"), src.as_os_str(), dst.as_os_str()]);
+    assert_eq!(ours.status.code(), Some(0));
+    // Not a terminal here, so this is passthrough: cp's own -v line, byte for byte. cp quotes
+    // the unrepresentable byte itself, so identity with cp is the contract, not a raw 0xFF.
+    assert!(!theirs.stdout.is_empty(), "cp did print a -v line");
+    assert_eq!(ours.stdout, theirs.stdout, "the -v line matches cp exactly");
+    // The name really did survive as bytes: the copy exists at the exact path.
+    assert_eq!(std::fs::read(&dst).unwrap(), b"x");
+}
