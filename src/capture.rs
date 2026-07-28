@@ -9,7 +9,7 @@
 //! never parsed. Both relays are immediate: bytes are forwarded as read, never held waiting
 //! for a newline, so the live scroll stays live (docs/testing.md B9).
 
-use std::io::Read;
+use std::io::{self, Read};
 use std::sync::mpsc::SyncSender;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -36,6 +36,11 @@ pub(crate) fn relay_stdout(
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
+            // A signal-interrupted read is not the end of the stream: retry it. Folding EINTR
+            // into the EOF arm would end the relay early and silently drop whatever `cp` had
+            // left to say (exceptions D8). Any other error still ends the loop, or a
+            // permanently failing fd would spin this thread forever.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 if pulse.feed(&buf[..n]) > 0 {
@@ -54,6 +59,9 @@ pub(crate) fn relay_bytes(mut reader: impl Read, tx: &SyncSender<Vec<u8>>) {
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
+            // Same rule as relay_stdout: EINTR is a retry, not an EOF (exceptions D8). This is
+            // the stream carrying cp's diagnostics, so truncating it is the worse of the two.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 if tx.send(buf[..n].to_vec()).is_err() {
@@ -145,6 +153,73 @@ mod tests {
         }
         assert!(relay.is_finished(), "dropping the receiver must end the relay");
         relay.join().unwrap();
+    }
+
+    /// A reader that hands out `Interrupted` between chunks, the way a signal-interrupted
+    /// `read(2)` surfaces when the handler was installed without `SA_RESTART`.
+    struct InterruptingReader {
+        chunks: Vec<&'static [u8]>,
+        next: usize,
+        interrupt_before_next: bool,
+    }
+    impl InterruptingReader {
+        fn new(chunks: Vec<&'static [u8]>) -> Self {
+            Self { chunks, next: 0, interrupt_before_next: true }
+        }
+    }
+    impl std::io::Read for InterruptingReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.interrupt_before_next {
+                self.interrupt_before_next = false;
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            let Some(chunk) = self.chunks.get(self.next) else { return Ok(0) };
+            self.next += 1;
+            self.interrupt_before_next = true; // interrupt again before the following chunk
+            buf[..chunk.len()].copy_from_slice(chunk);
+            Ok(chunk.len())
+        }
+    }
+
+    #[test]
+    fn an_interrupted_read_does_not_end_the_relay() {
+        // #32 / exceptions D8. EINTR is not the end of the stream. Folding it into the EOF arm
+        // silently drops whatever cp had left to say — the same class of loss #4 fixed on the
+        // render side, but with no trace at all.
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        let reader = InterruptingReader::new(vec![b"'a' -> 'b'\n", b"cp: error\n"]);
+        relay_stdout(reader, &slow, &tx, true);
+        drop(tx);
+        let relayed: Vec<u8> = rx.into_iter().flatten().collect();
+        assert_eq!(relayed, b"'a' -> 'b'\ncp: error\n", "both chunks survive the interruptions");
+    }
+
+    #[test]
+    fn an_interrupted_read_does_not_end_the_stderr_relay() {
+        // stderr carries cp's diagnostics, so truncating it there is the worse of the two.
+        let (tx, rx) = mpsc::sync_channel(16);
+        let reader = InterruptingReader::new(vec![b"cp: cannot stat 'x'", b": No such file\n"]);
+        relay_bytes(reader, &tx);
+        drop(tx);
+        let relayed: Vec<u8> = rx.into_iter().flatten().collect();
+        assert_eq!(relayed, b"cp: cannot stat 'x': No such file\n");
+    }
+
+    #[test]
+    fn a_real_read_error_still_ends_the_relay() {
+        // Only Interrupted is retried; anything else must still terminate, or a permanently
+        // failing fd would spin the reader thread forever.
+        struct AlwaysBroken;
+        impl std::io::Read for AlwaysBroken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fd is gone"))
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel(16);
+        relay_bytes(AlwaysBroken, &tx);
+        drop(tx);
+        assert!(rx.into_iter().next().is_none(), "returns instead of looping");
     }
 
     #[test]
