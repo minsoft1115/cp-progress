@@ -172,15 +172,18 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
     std::os::unix::fs::symlink(find_cp(), plain.join("cp")).unwrap();
     assert!(hidden.join("stdbuf").exists(), "precondition: stdbuf is reachable while readable");
     let bindir = hidden;
+    // Restore on *every* path, including an unwind: a directory left at mode 000 would make
+    // TmpDir's own cleanup fail and leave it behind after a red run.
+    struct Restore(std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
     std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let reachable = bindir.join("stdbuf").metadata().is_ok();
-    // Restore before any assertion can unwind, or TmpDir's cleanup fails.
-    let restore = || {
-        let _ = std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o755));
-    };
-    if reachable {
-        restore();
-        return; // some filesystems/environments ignore the mode; nothing to test then
+    let _restore = Restore(bindir.clone());
+    if bindir.join("stdbuf").metadata().is_ok() {
+        return; // some filesystems ignore the mode; the precondition does not hold here
     }
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
@@ -216,7 +219,6 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
         }
     }
     let status = child.wait().unwrap();
-    restore();
 
     assert!(status.success(), "the copy still succeeds via passthrough: {status:?}");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 200 * 1024 * 1024, "and really happened");
