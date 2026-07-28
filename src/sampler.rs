@@ -90,6 +90,11 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
     /// compared against their previous sizes and the biggest gainer wins. Until there is
     /// something to compare (or if nothing grew) we keep whatever was already being tracked
     /// rather than guess, and otherwise report no choice at all.
+    ///
+    /// The comparison is exclusive, so on a tie the first candidate seen keeps the tick
+    /// (exceptions E24). Equal growth says nothing about which file cp is writing; what the rule
+    /// buys is determinism — switching on a tie would hand the bar back and forth between two
+    /// files for as long as they grow in step.
     fn choose_dest(&mut self, dests: &[(i32, PathBuf)]) -> Option<(i32, PathBuf)> {
         if let [only] = dests {
             self.candidate_sizes.clear();

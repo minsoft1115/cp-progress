@@ -62,8 +62,10 @@ pub trait ProcSource {
 
 /// Collect the write and read candidates from a snapshot of open fds.
 ///
-/// Only fds above the stdio range (`fd > 2`) are considered, so a redirected stdin/stdout
-/// pointing at a regular file is never mistaken for the copy's source/destination. Returns
+/// Only fds above the stdio range (`fd > 2`) are considered, so a redirected stdin pointing at a
+/// regular file is never mistaken for the copy's source (exceptions E11). The filter is on the
+/// number, not the kind: under managed mode cp's stdout and stderr are pipes and would be
+/// dropped by kind anyway, but stdin stays inherited and can be any regular file. Returns
 /// `None` when nothing is open for writing (between files, or during a directory op).
 pub fn select_current(entries: &[FdEntry]) -> Option<CurrentFile> {
     let copy_fds = entries.iter().filter(|e| e.fd > 2);
@@ -261,19 +263,37 @@ mod tests {
 
     #[test]
     fn redirected_low_fds_are_not_selected() {
-        // `cprog a b < in > out 2> err` in a terminal: fd0/fd1/fd2 are regular files but are
-        // stdio, not cp's copy fds. Only fd > 2 counts.
+        // `cprog a b < in` in a terminal: cp inherits a regular-file stdin, which is stdio and
+        // not one of its copy fds. Only fd > 2 counts.
         //
-        // exceptions E11: the exclusion is by fd *number*, not by kind. Leaving fd 2 as some
-        // non-regular thing here would have let the kind filter do the rejecting and never asked
-        // whether the number rule holds at its own boundary — and `2>` is the one redirect that
-        // makes stdio a regular write fd, the exact shape the rule exists to reject.
-        let e = vec![
+        // exceptions E11: the exclusion is by fd *number*, not by kind, and fd 0 is the half of
+        // that rule which is actually reachable. Managed always hands cp pipes for stdout and
+        // stderr, so those two can never be regular files; stdin is the one stdio fd that stays
+        // inherited. Without the number rule it would join the read candidates and — being the
+        // only read fd below the destination — become the source, making `total` the size of
+        // whatever stdin happens to point at.
+        let mut e = vec![
+            entry(0, "/in", FdKind::RegularRead),
+            entry(1, "pipe:[1]", FdKind::Other),
+            entry(2, "pipe:[2]", FdKind::Other),
+        ];
+        assert_eq!(select_current(&e), None, "stdio alone is not a copy in flight");
+
+        e.push(entry(3, "/dst/a.iso", FdKind::RegularWrite));
+        let cur = select_current(&e).unwrap();
+        assert_eq!(cur.dests, vec![(3, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(3, &cur.sources), None, "a redirected stdin is not the source");
+
+        // The boundary itself, at fd 2. Managed mode cannot produce a regular-file fd 2 — it is
+        // a pipe by construction — so this half is defensive. It is still written as a number
+        // rather than left to the kind filter, because that is what keeps the rule true if the
+        // capture ever changes shape.
+        let stdio_as_files = vec![
             entry(0, "/in", FdKind::RegularRead),
             entry(1, "/out", FdKind::RegularWrite),
             entry(2, "/err", FdKind::RegularWrite),
         ];
-        assert_eq!(select_current(&e), None);
+        assert_eq!(select_current(&stdio_as_files), None);
     }
 
     #[test]

@@ -157,6 +157,10 @@ fn stdbuf_available() -> bool {
 }
 
 /// Whether `p` is a regular, executable file.
+///
+/// Both halves are load-bearing: a directory named `stdbuf` on `PATH`, or a copy that lost its
+/// execute bit, must read as "not here" and let the search continue. Answering yes to either
+/// enters managed mode and only then fails to spawn (exceptions B8).
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()

@@ -197,6 +197,9 @@ struct Fields<'a> {
 /// Compose one footer line for the given present fields, or `None` if it cannot fit in `cols`
 /// (the bar needs at least the smallest quantum; fixed fields must not overflow). Display
 /// order: `bar · percent · size · rate · eta`.
+///
+/// "Does not fit" is exclusive: a layout that uses the last available column is kept, because
+/// filling the width is not exceeding it (exceptions F4).
 fn compose(cols: usize, show_bar: bool, pct: Option<f64>, fields: Fields, style: Style) -> Option<String> {
     let mut segs: Vec<Seg> = Vec::new();
     if show_bar {
@@ -319,6 +322,10 @@ fn format_percent(pct: Option<f64>) -> String {
 const SIZE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
 /// Divisor and unit index so `bytes` reads in a sensible unit (largest where value >= 1).
+///
+/// The index stops at the last entry of [`SIZE_UNITS`], so anything past a TiB keeps counting in
+/// TiB rather than walking off the table — which would be an out-of-bounds panic, and a panic
+/// takes cp's exit code with it (exceptions F18).
 fn scale_unit(bytes: u64) -> (f64, usize) {
     let mut u = 0;
     let mut div = 1.0_f64;
@@ -352,7 +359,8 @@ fn format_size(done: u64, total: Option<u64>) -> String {
     }
 }
 
-/// Format a throughput in bytes/sec with a binary unit, or `-- MiB/s` when unknown.
+/// Format a throughput in bytes/sec with a binary unit, or `-- MiB/s` when unknown. Saturates at
+/// the last unit for the same reason [`scale_unit`] does (exceptions F18).
 fn format_rate(rate: Option<f64>) -> String {
     let Some(r) = rate.filter(|r| *r >= 0.0) else {
         return "-- MiB/s".to_string();
@@ -375,7 +383,8 @@ fn format_rate(rate: Option<f64>) -> String {
     }
 }
 
-/// Format a remaining time as `MM:SS` (or `H:MM:SS` past an hour), or `--:--` when unknown.
+/// Format a remaining time as `MM:SS` (or `H:MM:SS` from one hour on — 3600 s reads `1:00:00`,
+/// not `60:00`), or `--:--` when unknown.
 fn format_eta(eta: Option<Duration>) -> String {
     let Some(d) = eta else {
         return "--:--".to_string();
@@ -526,7 +535,7 @@ mod tests {
         // exceptions F18. Past the end of SIZE_UNITS the number keeps growing in TiB rather than
         // the unit index walking off the table — which would be an out-of-bounds panic, and a
         // panic is exit 101 over cp's own status. A petabyte is not exotic: `truncate -s 1P`
-        // makes one instantly and cprog measures the logical length (E4).
+        // makes one instantly and cprog measures the logical length (exceptions E4).
         assert_eq!(format_size(0, Some(1 << 50)), "0.0/1024.0 TiB", "1 PiB total");
         assert_eq!(format_size(1 << 50, Some(1 << 51)), "1024.0/2048.0 TiB");
         assert_eq!(format_size(1 << 60, None), "1048576.0 TiB", "1 EiB copied");

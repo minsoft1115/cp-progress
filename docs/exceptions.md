@@ -68,7 +68,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 |---|---|---|---|
 | B1 | **`cprog a b \| less`, `\| tee`** (stdout이 파이프) | `stdout_tty=false` → passthrough | ✅ `plan.rs::stdout_not_tty_is_passthrough`, `tests/passthrough.rs::passthrough_output_is_byte_identical_to_cp` |
 | B2 | **`cprog a b > log`** (리다이렉트) | 동일하게 passthrough | ✅ |
-| B3 | **`cprog a b 2> err`** (stderr만 리다이렉트) | `stderr_tty=false` → passthrough. footer/요약이 stderr로 나가므로 stderr가 터미널이 아니면 managed를 포기한다 | ✅ `plan.rs::stderr_not_tty_is_passthrough` |
+| B3 | <a id="b3"></a>**`cprog a b 2> err`** (stderr만 리다이렉트) | `stderr_tty=false` → passthrough. footer/요약이 stderr로 나가므로 stderr가 터미널이 아니면 managed를 포기한다 | ✅ `plan.rs::stderr_not_tty_is_passthrough` |
 | B4 | **stdout과 stderr가 서로 다른 터미널** | `fstat`의 `(st_dev, st_ino)` 비교로 감지 → passthrough. 두 터미널에 나눠 쓰면 sole-writer 전제가 깨지기 때문 | ✅ `term::same_terminal`, `plan.rs::different_terminals_is_passthrough` |
 | B5 | **`TERM` 미설정 / 빈 문자열 / `dumb`** | passthrough. 색도 함께 꺼짐 | ✅ `term::term_ok` |
 | B6 | **CI 환경(`CI` 설정)** | passthrough. **`CI=`(빈 문자열)도 CI로 간주**한다 — `var_os().is_some()` 판정이라 값은 안 본다(보수적, 의도적) | ✅ `plan.rs::ci_is_passthrough` |
@@ -133,7 +133,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E8 | **현재 대상이 `/proc`에 없음** (파일 사이, 디렉터리 생성 중, hardlink/symlink 생성) | write fd가 없으므로 `select_current`가 `None` → 바 없음 | ✅ `proc.rs::no_write_fd_means_no_current_file` |
 | E9 | **원본이 특수파일**(fifo/device) | `RegularRead`가 아니므로 `total = None` → indeterminate(가짜 100% 금지) | ✅ `proc.rs::special_source_gives_indeterminate_total` |
 | E10 | **`/proc`/`stat` 읽기 실패** (fd 닫힘, pid 종료, 권한, hidepid) | 그 tick만 skip하고 마지막 값 유지. 크래시 없음 | ✅ `sampler.rs::dest_stat_error_skips_tick_and_keeps_model`, `proc_error_skips_tick` |
-| E11 | **stdio가 정규 파일로 리다이렉트** | `fd > 2`만 후보로 삼아 stdio를 복사 대상으로 오인하지 않음. **판정은 종류가 아니라 번호로 한다** — `fd ≤ 2`는 정규 파일로 열려 있어도(쓰기든 읽기든) 후보에서 빠진다. 종류로 거르면 `2> out`처럼 stdio가 진짜 정규 파일인 순간에 규칙이 사라진다 | ✅ `proc.rs::redirected_low_fds_are_not_selected` (#53에서 정규 파일 fd 2까지 포함) |
+| E11 | **stdio가 정규 파일로 리다이렉트**(`cprog a b < in`) | `fd > 2`만 후보로 삼아 stdio를 복사 대상·원본으로 오인하지 않음. **판정은 종류가 아니라 번호로 한다.** 실제로 닿는 것은 **fd 0 하나뿐이다** — managed는 cp의 stdout/stderr를 언제나 파이프로 캡처하므로 fd 1·2는 정규 파일일 수 없고(`2> err`은 stderr가 tty가 아니라 [B3](#b3)으로 passthrough다), 상속되는 stdin만 정규 파일일 수 있다. 번호 규칙이 없으면 그 fd 0이 *읽기 후보*로 들어가, 대상보다 작은 유일한 읽기 fd일 때 원본으로 뽑혀 `total`이 stdin이 가리키는 파일 크기가 된다. fd 1·2까지 배제하는 절반은 그래서 **닿지 않는 방어**이고, 그럼에도 종류가 아니라 번호로 적어두는 이유는 캡처 방식이 바뀌어도 규칙이 남기 때문이다 | ✅ `proc.rs::redirected_low_fds_are_not_selected` — 닿는 절반(fd 0이 원본이 되지 않음)과 번호 경계 양쪽 (#53) |
 | E12 | **rate/eta가 아직 미지** | 샘플 2개 미만이면 `None` → `(-- MiB/s)` / `⏳ --:--`. 엉뚱한 숫자를 지어내지 않음 | ✅ `progress.rs::rate_unknown_before_two_samples` |
 | E13 | **cp가 다음 파일로 넘어감** | 대상 경로가 바뀌면 새 모델 + 새 `total`로 리셋 | ✅ `sampler.rs::new_file_resets_total` |
 | E14 | **`cp`의 기본 `--sparse=auto`가 만든 대상** | sparse 대상에서도 `st_size`로 재므로 비율이 정상적으로 100%에 도달한다 | ✅ `sampler.rs::sparse_destination_progress_reaches_completion` (#3, #12) |
@@ -157,7 +157,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | F1 | **바 도중 리사이즈(SIGWINCH)** | 플래그 latch → 다음 tick에 `TIOCGWINSZ` 재조회 → 재배치 | ✅ `term::should_requery_size`, `tests/resize.rs` |
 | F2 | **SIGWINCH 유실/합쳐짐** | 1초 폴백 재조회가 있어 낡은 크기로 고정되지 않음 | ✅ `term.rs::resize_requery_rule` |
 | F3 | **터미널 높이 < 4행** | footer 억제(`rows < MIN_LOG_ROWS + FOOTER_ROWS`) — footer 2행 위에 로그 영역 2행을 항상 남긴다 | ✅ `ui::render_footer`(C3) |
-| F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림. **경계는 배타적** — 판정이 `고정폭 + 구분자 > cols`라 **폭에 정확히 들어맞는 배치는 버리지 않는다**([ui.md 예제 6](./ui.md)) | ✅ `ui.rs` ATTEMPTS, 경계는 `ui.rs::a_layout_that_exactly_fits_is_not_shed` (#53) |
+| F4 | **좁은 폭** | `eta → rate → size → bar → percent` 순으로 필드를 버림. 바는 `50→20→10`으로 양자화 축소, 10칸도 못 넣으면 버림. **마지막(바 없는) 단계의 경계는 배타적** — 판정이 `고정폭 + 구분자 > cols`라 **폭에 정확히 들어맞는 배치는 버리지 않는다**([ui.md 예제 6](./ui.md)). 바가 있는 단계에서는 이 질문이 안 생긴다 — 고정폭이 폭을 정확히 채우면 바에 남는 칸이 0이라 어차피 바가 버려진다 | ✅ `ui.rs` ATTEMPTS, 경계는 `ui.rs::a_layout_that_exactly_fits_is_not_shed` (#53) |
 | F5 | **극단적으로 좁은 폭**(percent도 안 들어감) | 최후 수단으로 percent만 출력하며 **오버플로우를 허용**. 터미널이 줄바꿈하면 footer가 2행을 차지해 한 줄만 지우는 erase로는 잔상이 남을 수 있음 | 📄 `ui::render_footer` 주석 |
 | F6 | **렌더 중 panic** | `FooterGuard::Drop`이 unwind 중에도 footer 지우고 커서 복원 | ✅ `render.rs::drop_erases_even_on_panic` |
 | F7 | <a id="f7"></a>**`SIGKILL` / `SIGSEGV`** | 핸들러도 `Drop`도 못 돈다 → **footer 잔상 + 커서가 숨겨진 채로 터미널이 남는다.** `PDEATHSIG`로 cp는 정리되지만 화면은 사용자가 `tput cnorm` / `reset`으로 복구해야 함 | 📄 회피 불가 — `usage.md`의 `tput cnorm` 안내 (#10) |

@@ -21,6 +21,10 @@ use crate::verbose::LinePulse;
 /// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
 /// relay channel.
 ///
+/// The pulse fires only for reads that *completed* a line. A read that lands mid-line is not a
+/// new item, and treating it as one would restart the slow-file clock on the very files the
+/// footer exists for (exceptions D3).
+///
 /// `-v` is injected either way, because the slow-file timer has nothing else to go on. But the
 /// bytes only reach the terminal when they were requested: cprog otherwise floods the scrollback
 /// with output the user never asked for, which is the one place it visibly differs from plain
@@ -105,10 +109,11 @@ mod tests {
 
     #[test]
     fn a_chunk_without_a_line_boundary_does_not_pulse() {
-        // The other half of D3, and the one the pulse count depends on: a read that completed no
-        // line must leave the timer alone. Pulsing on every read instead would restart the
-        // slow-file clock mid-line (B3, a `-v` line split across chunks) and again at a file
-        // boundary (B7) — the bar would keep resetting on the very files it exists for.
+        // The other half of exceptions D3, and the one the pulse count depends on: a read that
+        // completed no line must leave the timer alone. Pulsing on every read instead would
+        // restart the slow-file clock mid-line (docs/testing.md B3, a `-v` line split across
+        // chunks) and again at a file boundary (docs/testing.md B7) — the bar would keep
+        // resetting on the very files it exists for.
         let (tx, rx) = mpsc::sync_channel(16);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         let t0 = Instant::now();

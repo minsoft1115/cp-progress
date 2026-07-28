@@ -98,7 +98,8 @@ fn colorize(line: String, sgr: &str, color: bool) -> String {
     }
 }
 
-/// Format an elapsed duration as `MM:SS`, or `H:MM:SS` once past an hour.
+/// Format an elapsed duration as `MM:SS`, or `H:MM:SS` from one hour on (3600 s reads `1:00:00`,
+/// not `60:00` — the same boundary as the footer's eta, docs/ui.md).
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
     if secs < 3600 {
