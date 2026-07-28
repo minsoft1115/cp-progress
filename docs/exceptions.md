@@ -35,7 +35,7 @@
 | A1a | **재전송 경로의 정확한 범위** (실시간 시그널 / 재전송 실패) | 재현은 `signal_hook::low_level::emulate_default_handler`가 한다(기본 disposition 복원 → unblock → raise). **① 표준 시그널** — 이 함수는 자기 raise가 돌아오면 `abort()`로 끝내므로, 재전송이 실패해도 A1의 `128 + s`에 **닿지 않고 SIGABRT로 죽는다**. 닿으려면 `WTERMSIG`가 준 유효한 시그널에 `sigaction`이 실패해야 하는데 리눅스에선 일어나지 않는다 — **블록된 시그널로도 부족하다**(내부에서 먼저 unblock하므로. 블록한 SIGTERM이 그대로 SIGTERM으로 죽는 것을 실측). **② 실시간 시그널**(`SIGRTMIN`~`SIGRTMAX`) — 이 함수의 표에 없어 `EINVAL`이므로 `low_level::raise`로 직접 올린다. disposition이 기본값인 것은 **보장**된다(cprog는 SIGINT/TERM/HUP/QUIT/WINCH/TSTP에만 핸들러를 단다). 하지만 **마스크는 부모에게서 물려받은 것을 따른다** — cprog는 스스로 아무것도 unblock하지 않으므로, 그 시그널이 블록돼 있으면 raise가 pending만 남기고 반환하고 그때 A1의 `128 + s`가 쓰인다. **폴백이 실제로 살아있는 유일한 경로다.** 이 갈래 자체가 없으면 실시간 시그널은 언제나 `128 + s`로 정상 종료해 A1이 깨진다 | ✅ `tests/signals.rs::cp_killed_by_a_realtime_signal_still_exits_cprog_signaled` (#43) |
 | A2 | **`cprog`만 단독으로 시그널 받음** (`kill <cprog-pid>`) | 렌더 루프가 즉시 break → **받은 시그널을 그대로 `cp`에 전달**(SIGTERM으로 정규화하지 않음) → cp가 그 시그널로 죽고 파이프가 닫혀 join이 유계 → A1 규칙으로 cprog도 같은 시그널로 종료 | ✅ `lib.rs::run_managed`(`received_signal`), `tests/signals.rs::signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised` |
 | A3 | **시그널 도착 시 `cp`가 이미 종료** | `try_wait`이 `Some(_)`이면 전달 생략. `try_wait` 자체가 에러면 "살아있을 수도"로 보고 방어적으로 `kill` — 이미 죽은 pid엔 `ESRCH`라 무해 | ✅ `lib.rs::run_managed` |
-| A4 | **잡는 시그널의 범위** | `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` 4종만 등록. 그 외(`SIGUSR1` 등)는 기본 동작 | 🟡 `lib.rs::run_managed` |
+| A4 | **잡는 시그널의 범위** | `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` 4종만 등록. 그 외(`SIGUSR1` 등)는 **기본 동작** — 종료형이면 정리를 한 줄도 못 돌고 죽으므로 **footer 잔상 + 커서 숨김이 남는다**([F7](#f7)과 같은 결말). 4종에 한정한 대가이고, 모든 시그널을 잡으면 그건 그것대로 `cp`와 달라진다 | ✅ `lib.rs::run_managed`, `tests/signals.rs::a_signal_cprog_does_not_register_keeps_its_default_action` (#47) |
 | A5 | **Ctrl-C를 두 번 이상** | 첫 번째로 렌더 루프가 break. 이후 teardown(join/wait) 구간의 추가 시그널은 핸들러가 값만 덮어쓰고 **아무도 읽지 않음** → 즉각 반응 없음. 단 cp에 이미 전달돼 곧 종료하므로 대기는 유계 | 📄 `lib.rs::run_managed` |
 | A6 | **passthrough에서 시그널** | 핸들러를 아예 등록하지 않으며, passthrough는 exec라 시그널을 받는 것이 곧 `cp` 본체다(‑ 버전 한 줄 경로만 spawn+wait이고 거기서도 핸들러 없이 기본 동작) → `cp`와 완전 동일 | ✅ 설계상, `tests/passthrough.rs` |
 | A7 | **`SIGPIPE`** | Rust 런타임이 부모에서 무시하므로 relay 실패가 `EPIPE` 에러로 표면화(패닉 아님). spawn된 자식은 `std::process::Command`가 기본 disposition을 복원하고, **exec 경로는 exec 직전에 직접 `SIG_DFL`로 복원**한다 — ignore가 exec를 넘어가면 `cp -v … \| head`에서 순정과 달라지기 때문. **exec가 실패하면 ignore를 되돌린다** — 안 그러면 cprog 자신의 `Fatal` stderr 쓰기가 broken pipe에서 SIGPIPE 사망이 되어 exit 127 계약을 깬다 | ✅ `tests/passthrough.rs::verbose_to_a_closed_pipe_dies_of_sigpipe_like_cp`, `tests/exit_contract.rs`(usage·failed-exec 모두 stderr가 broken pipe여도 exit code 유지) |
@@ -72,7 +72,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | B7 | **비-리눅스 / `/proc` 없음** | `cfg!(linux) && /proc/self/fd` 존재 확인 → 실패 시 passthrough | ✅ `term::proc_available` |
 | B8 | **`stdbuf`가 PATH에 없음** | passthrough. `stdbuf` 없이는 `-v`가 파이프에서 block-buffer돼 라이브 UI를 못 지키므로, 약속을 못 지키느니 깔끔히 포기 | ✅ `term::stdbuf_available`, `tests/fallback.rs::missing_stdbuf_falls_back_to_passthrough` |
 | B9 | **`cprog a b &`** (백그라운드 실행) | `tcgetpgrp(stdout) != getpgrp()` → `foreground=false` → passthrough. 백그라운드 작업이 터미널을 점거하면 안 되므로 | ✅ `term::is_foreground`, `tests/background.rs` (bug1 / #1) |
-| B10 | **`tcgetpgrp`이 `ENOTTY`** (제어터미널 아님) | 백그라운드임을 **증명할 수 없으므로 관대하게 허용**(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 정상 감지됨 | 🟡 `term::is_foreground` |
+| B10 | **`tcgetpgrp`이 `ENOTTY`** (제어터미널 아님) | 백그라운드임을 **증명할 수 없으므로 관대하게 허용**(`foreground=true`). 실제 백그라운드 잡은 제어터미널을 갖고 있어 정상 감지된다(B9) — 관대함이 비용을 안 치르는 이유 | ✅ `term::is_foreground`, `term.rs::a_non_terminal_fd_is_treated_as_foreground` (#47) |
 | B11 | **`-i` / `--interactive` / `--interactive=…`** | passthrough 강제. 캡처하면 덮어쓰기 프롬프트가 깨지기 때문 | ✅ `args::inspect`, `plan.rs::interactive_forces_passthrough` |
 | B12 | **`--help` / `--version`** | `informational` → passthrough. 복사가 없으니 감시할 것도, 요약할 것도 없음 | ✅ `args.rs::help_and_version_are_informational`, `tests/managed.rs::help_over_pty_passes_through_but_names_cprog` |
 | B13 | **인자 스캔 자체가 실패** (예: `--suffix` 값 누락) | `ArgError::Scan` → **보수적으로 passthrough**(cp가 알아서 에러를 냄). 이 폴백은 **cp도 거부할 인자에만** 걸려야 한다 — B13a 참조 | ✅ `args.rs::missing_required_value_is_scan_error`, 폴백 배선은 `tests/passthrough.rs::scan_error_falls_back_to_passthrough_byte_identical` |
@@ -90,10 +90,10 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | C1 | **`cp`가 PATH에 없음 / 실행 불가** | `Fatal::CpSpawn` → stderr 한 줄 + **exit 127**(셸 관례) | ✅ `messages::Fatal`, `messages.rs::cp_spawn_fatal`, 실바이너리 `tests/exit_contract.rs::missing_cp_is_fatal_cpspawn_exit_127` |
 | C2 | **`cp`가 비-0으로 종료** (권한 없음, ENOSPC, `-r` 없이 디렉터리) | cp의 에러를 로그 영역에 relay → footer 지움 → **중립 문구** `✗ cp exited n - T elapsed`(진행바가 떴을 때만) → exit code 그대로 | ✅ `tests/managed.rs::managed_relays_cp_error_and_preserves_exit_code`, `tests/passthrough.rs::preserves_nonzero_exit_on_cp_failure` |
 | C3 | **`wait()` 실패** (예: `ECHILD`) | `Fatal::CpWait { pid, source }` → exit 1 | ✅ `messages.rs::cp_wait_fatal` |
-| C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님). **spawn 경로에만 해당** — exec된 passthrough는 cprog가 곧 `cp`라 고아 문제가 없고, PDEATHSIG를 걸지도 않는다(걸면 `cp`의 수명이 셸에 묶여 순정과 달라짐) | 🟡 `process::spawn`, `process::exec_replace` |
+| C4 | **`cprog`가 먼저 죽음** | `PR_SET_PDEATHSIG(SIGTERM)`으로 `cp`가 고아로 남지 않음. `pre_exec` 실패는 삼킴(복사를 막을 이유가 아님). **spawn 경로에만 해당** — exec된 passthrough는 cprog가 곧 `cp`라 고아 문제가 없고, PDEATHSIG를 걸지도 않는다(걸면 `cp`의 수명이 셸에 묶여 순정과 달라짐) | ✅ `process::spawn`, `process::exec_replace`, `tests/signals.rs::killing_cprog_outright_takes_cp_with_it` (#47) |
 | C5 | **C4에서 부분 복사된 대상 파일** | `cp`는 SIGTERM에 정리를 하지 않으므로 **잘린 대상 파일이 남는다.** 이는 `cp`를 직접 죽였을 때와 동일한 결과 — 의미론 보존 | 📄 |
 | C6 | **PID 재사용 레이스** | `stdbuf`가 `cp`를 `exec`하므로 PID는 그대로 `cp`. 샘플러 join **이후에야** `wait()`로 reap하므로 샘플링 중 pid는 예약 상태 → 오염된 샘플이 불가능 | ✅ `process-model.md`; `tests/managed.rs`가 간접 증명(D7 — footer가 떴다는 것 자체가 spawn된 pid로 `cp`의 fd를 읽었다는 뜻) |
-| C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임) | 🟡 |
+| C7 | **`stdbuf`는 있는데 `cp`를 못 찾음** | `stdbuf`가 exec에 실패해 자체 에러 + 127로 종료. cprog 입장에선 **spawn은 성공**했으므로 `Fatal::CpSpawn`이 아니라 "cp가 127로 종료"로 보인다(메시지는 relay되어 화면에 보임). C1과 대칭이 아닌 지점 — 여기서 cprog 이름의 에러를 지어내면 래퍼 탓이 아닌 실패를 래퍼 탓처럼 보이게 한다 | ✅ `tests/fallback.rs::stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127` (#47) |
 | C8 | **자식은 하나뿐** | 외부 progress 도구도 hidden PTY도 없으므로 누수될 helper 프로세스 자체가 없다 | 📄 |
 
 ---
@@ -140,7 +140,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | E23 | **성장 비교용 크기 기록의 수명** | 이전 크기 기록은 **이번 틱의 후보만** 남긴다. 후보 수는 항상 한 자릿수(실제 대상 + 셸이 물려준 것 몇 개)이므로 기록도 그만큼으로 유계다. 복사한 파일 수에 비례해 쌓이면 "cprog의 메모리는 파일 개수와 무관"이라는 성질이 깨진다 — 후보가 계속 2개 이상이면 사이에 후보 없는 틱(E13)이 안 끼어 정리 기회가 없기 때문 | ✅ `sampler.rs::candidate_tracking_does_not_grow_with_the_number_of_files` (#33) |
 | E21 | **상속된 *읽기* fd가 원본으로 오인됨** | 원본을 **고른 대상 fd보다 작은 읽기 fd 중 가장 큰 것**으로 짝짓는다(`cp`는 원본을 열고 곧바로 대상을 연다) → 상속된 읽기 fd와 대상 이후에 열린 fd가 함께 배제된다 | ✅ `proc::source_for` (#11) |
 | E22 | **ext4 delayed allocation** (writeback 전 `blocks*512 < size`) | 측정 기준 판정 분기가 **없다** — 언제나 `st_size`로 재므로 지연 할당 상태와 무관하게 정확하다 | ✅ (#12) — 항상 `st_size` |
-| E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | 🟡 E10과 동일 경로 |
+| E18 | **삭제된 대상**(`readlink`가 `… (deleted)`) | 그 경로의 `stat`이 실패 → tick skip → 마지막 값 유지 | ✅ E10과 **문자 그대로 같은 분기**라 E10의 테스트가 곧 이것이다(`sampler.rs::dest_stat_error_skips_tick_and_keeps_model`). 이유만 다르고 코드가 같은 것에 테스트를 따로 두면 커버리지가 아니라 중복이다 |
 | E19 | **아주 빠른 파일** | 첫 샘플 전에 끝남 → 바 없이 지나감(의도된 동작) | 📄 |
 | E20 | **샘플링 비용** | 느린 파일일 때만, tick(기본 100ms)마다 `/proc/<pid>/fd` 열거(항목마다 readlink + 종류·모드 조회) + `stat` 1~2회. 파일 **데이터는 읽지 않아** 페이지 캐시를 오염시키지 않음 | 📄 |
 
@@ -178,7 +178,7 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 | G5 | **번들 단축 옵션**(`-ai`, `-av`) | 각각 분해해 감지 | ✅ `args.rs::bundled_short_interactive` |
 | G6 | **operand 뒤에 오는 옵션**(`cp src -i dst`) | `cp`처럼 permute 처리 | ✅ `args.rs::permuted_interactive_after_operand` |
 | G7 | **그 외 cp 옵션**(`--sparse=`, `--reflink=`, `--preserve=`, `--backup=`) | 인식하지 않고 그대로 통과. 이들은 값을 `=`로 붙이거나 선택적 값이라 `-i`/`-v` 오인 위험이 없다. **값 필수인 단축 옵션은 `-S`/`-t`뿐**이라 G3으로 충분 | 📄 |
-| G8 | **비-UTF-8 인자** | `OsString`으로 다뤄 그대로 `cp`에 전달 | 🟡 `args::inspect` |
+| G8 | **비-UTF-8 인자** | `OsString`으로 다뤄 그대로 `cp`에 전달한다 — 스캔은 인자 벡터를 **재구성하지 않는다**. 플래그 검출도 정상 동작한다(벡터에 표현 불가한 바이트가 있다고 스캔을 포기하면 조용히 passthrough로 떨어진다). `cp` 자신은 그 바이트를 `$'\377'`로 이스케이프해 출력하므로, 계약은 "raw 바이트가 보인다"가 아니라 **`cp`와 바이트 동일** | ✅ `tests/passthrough.rs::a_non_utf8_argument_reaches_cp_unchanged`, `a_non_utf8_argument_does_not_break_the_flag_scan` (#47) |
 
 ---
 
@@ -186,8 +186,8 @@ passthrough이고, passthrough는 스트림 inherit + env 미변경이라 **`cp`
 
 | # | 상황 | 현재 동작 | 근거 / 테스트 |
 |---|---|---|---|
-| H1 | **`CPROG_*_MS`가 숫자가 아님** | 에러 없이 **조용히 기본값**으로 폴백 | 🟡 `lib::env_ms` |
-| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 모든 파일이 즉시 "느림" → 거의 항상 footer가 뜸(‑ 통합 테스트는 같은 성질을 임계 1ms로 이용) | 🟡 |
+| H1 | **`CPROG_*_MS`가 숫자가 아님** | 에러 없이 **조용히 기본값**으로 폴백한다(빈 값·단위 접미사·음수·소수·공백·16진수·`u64` 초과 전부). 조용한 이유: 경고는 곧 `cp`가 안 냈을 줄을 cprog가 내는 것이고, 결과는 타이밍 손잡이가 문서화된 기본값으로 돌아가는 것뿐이라 사용자가 조치할 게 없다 | ✅ `lib.rs::env_knobs` (#47) |
+| H2 | **`CPROG_SLOW_THRESHOLD_MS=0`** | 에러가 아니라 유효한 설정이다. `>`가 배타적이라 **펄스 순간 자체는 아직 느리지 않고** 그 이후가 전부 느림 → 거의 항상 footer가 뜬다. "펄스 전에는 안 뜬다"는 가드가 임계보다 우선이라 `cp`가 파일 이름을 대기도 전에 바가 뜨는 일은 없다 | ✅ `slowfile.rs::a_zero_threshold_makes_everything_slow_from_the_first_instant_after_a_pulse`, `a_zero_threshold_still_reports_nothing_before_the_first_pulse` (#47) |
 | H3 | **managed의 env 변경 범위** | `QUOTING_STYLE=shell-escape` **하나뿐**. `LC_ALL=C`는 일부러 안 건다 — `-v`를 파싱하지 않으니 이득이 없고, C 로케일은 한글 등 비-ASCII 파일명을 옥타 이스케이프로 깨뜨린다 | ✅ `process.rs::managed_sets_only_quoting_style_not_locale` |
 | H4 | **passthrough의 env** | **전혀 건드리지 않음** → cp의 에러 메시지 로케일까지 바이트 동일 | ✅ `process.rs::passthrough_never_touches_env` |
 | H5 | **Mutex poisoning**(스레드 패닉) | `lock_shared`가 `into_inner()`로 복구. 공유 값(슬로우 타이머·최근 샘플)엔 깨질 불변식이 없고, 여기서 죽으면 `cp`를 wait 못 해 exit code 계약이 깨지므로 | ✅ `lib::lock_shared` |
