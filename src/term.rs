@@ -157,6 +157,14 @@ fn stdbuf_available() -> bool {
 }
 
 /// Whether `p` is a regular, executable file.
+///
+/// Both halves are load-bearing: a directory named `stdbuf` on `PATH`, or a copy that lost its
+/// execute bit, must read as "not here" and let the search continue. Answering yes stops the
+/// search there, and if that entry was the only `stdbuf` on `PATH` the spawn then fails with
+/// `EACCES` — `Fatal::CpSpawn`, exit 127, the copy never running at all where plain `cp` would
+/// have succeeded. With a working `stdbuf` further along `PATH`, `execvp` skips the bad entry
+/// and the run is unaffected, which is why the probe's job is to keep looking rather than to
+/// answer early (exceptions B8).
 fn is_executable_file(p: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     p.metadata()
@@ -260,6 +268,44 @@ mod tests {
             "precondition: a regular file must not answer tcgetpgrp"
         );
         assert!(is_foreground(&f.1), "an unanswerable tcgetpgrp must not read as backgrounded");
+    }
+
+    #[test]
+    fn the_stdbuf_probe_requires_a_regular_executable_file() {
+        // exceptions B8. Both halves of the probe carry weight, and dropping either one answers
+        // "installed" for something cprog cannot run: a directory named `stdbuf` on PATH, or a
+        // copy without its execute bit (an interrupted install, a file unpacked from an archive
+        // that lost its mode). Answering yes stops the PATH search at that entry; if it was the
+        // only `stdbuf` there, the spawn fails with EACCES and cprog exits 127 without copying
+        // anything — a working `cp` turned into a failure by the wrapper. (With a real `stdbuf`
+        // later on PATH, execvp skips the bad entry and nothing is lost, which is exactly why
+        // the probe must keep searching rather than answer early.) C7 is the opposite shape,
+        // where cp's own tooling reports the problem.
+        use std::os::unix::fs::PermissionsExt;
+
+        let f = TmpFile::new("exec");
+        std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(is_executable_file(&f.0), "a regular file with an execute bit is usable");
+
+        std::fs::set_permissions(&f.0, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!is_executable_file(&f.0), "no execute bit -> not usable");
+
+        // A directory, executable bits and all: searchable, but not something to exec.
+        let dir = std::env::temp_dir().join(format!("cprog_term_{}_dir", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        struct RmDir(std::path::PathBuf);
+        impl Drop for RmDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = RmDir(dir);
+        assert!(
+            std::fs::metadata(&dir.0).unwrap().permissions().mode() & 0o111 != 0,
+            "precondition: a directory carries execute (search) bits"
+        );
+        assert!(!is_executable_file(&dir.0), "a directory is not an executable file");
     }
 
     #[test]

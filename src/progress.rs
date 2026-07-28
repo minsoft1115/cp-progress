@@ -20,8 +20,8 @@ pub const DEFAULT_RATE_WINDOW: Duration = Duration::from_secs(1);
 pub fn percent_of(done: u64, total: Option<u64>) -> Option<f64> {
     match total {
         None => None,
-        Some(0) => Some(100.0),                    // A5: complete, and no divide-by-zero
-        Some(total) => Some((done as f64 / total as f64 * 100.0).clamp(0.0, 100.0)), // A6 clamp
+        Some(0) => Some(100.0),                    // docs/testing.md A5: complete, and no divide-by-zero
+        Some(total) => Some((done as f64 / total as f64 * 100.0).clamp(0.0, 100.0)), // docs/testing.md A6 clamp
     }
 }
 
@@ -101,7 +101,7 @@ impl ProgressModel {
     }
 
     /// Smoothed throughput (bytes/sec) across the window, or `None` with fewer than two
-    /// samples or a zero time span. A flat or negative delta yields exactly `0.0` (A7).
+    /// samples or a zero time span. A flat or negative delta yields exactly `0.0` (docs/testing.md A7).
     pub fn rate(&self) -> Option<f64> {
         if self.samples.len() < 2 {
             return None;
@@ -126,7 +126,7 @@ impl ProgressModel {
         }
         let rate = self.rate()?;
         if rate <= 0.0 {
-            return None; // A7: no forward progress -> eta unknown
+            return None; // docs/testing.md A7: no forward progress -> eta unknown
         }
         // try_from_secs_f64 rejects non-finite/overflowing durations instead of panicking.
         Duration::try_from_secs_f64(remaining as f64 / rate).ok()
@@ -159,7 +159,7 @@ mod tests {
         (a - b).abs() < 1e-6
     }
 
-    // ---- percent (A5 / A6, indeterminate) --------------------------------------------
+    // ---- percent (docs/testing.md A5 / A6, indeterminate) --------------------------------------------
 
     #[test]
     fn percent_basic_ratio() {
@@ -208,6 +208,26 @@ mod tests {
         m.push(t0, 0);
         m.push(t0 + Duration::from_secs(1), 100);
         assert!(approx(m.rate().unwrap(), 100.0), "100 bytes in 1s = 100 B/s");
+    }
+
+    #[test]
+    fn rate_is_per_second_not_per_window() {
+        // The rate is a *quotient*: bytes divided by the span they took. Every rate test that
+        // asserts a non-zero figure happens to use a one-second span, where dividing and
+        // multiplying by the span give the same number; the one test with a longer span
+        // (`without_reset_a_long_stop_drags_the_rate_to_zero`) has a zero delta, where they agree
+        // too. So nothing here actually said which operation this is.
+        let mut m = ProgressModel::new(Some(10_000), Duration::from_secs(4));
+        let t0 = Instant::now();
+        m.push(t0, 0);
+        m.push(t0 + Duration::from_secs(2), 300);
+        assert!(approx(m.rate().unwrap(), 150.0), "300 bytes over 2 s = 150 B/s");
+
+        // And on the other side of 1 s, where the two also disagree.
+        let mut half = ProgressModel::new(Some(10_000), Duration::from_secs(4));
+        half.push(t0, 0);
+        half.push(t0 + Duration::from_millis(500), 100);
+        assert!(approx(half.rate().unwrap(), 200.0), "100 bytes over 0.5 s = 200 B/s");
     }
 
     #[test]

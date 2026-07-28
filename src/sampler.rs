@@ -90,6 +90,12 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
     /// compared against their previous sizes and the biggest gainer wins. Until there is
     /// something to compare (or if nothing grew) we keep whatever was already being tracked
     /// rather than guess, and otherwise report no choice at all.
+    ///
+    /// The comparison is exclusive, so on a tie the **first candidate in enumeration order** wins
+    /// — including over the file already being tracked, since `self.current` is consulted only
+    /// when nothing grew at all (exceptions E24). Equal growth carries no information about which
+    /// file cp is writing, and fd order is at best a weak counter-signal: the inherited decoy is
+    /// the one that sorts *first*. The tie-break is therefore arbitrary and accepted as such.
     fn choose_dest(&mut self, dests: &[(i32, PathBuf)]) -> Option<(i32, PathBuf)> {
         if let [only] = dests {
             self.candidate_sizes.clear();
@@ -135,11 +141,12 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
     /// Take one sample at `now` (docs/progress-model.md "실패 처리").
     pub fn tick(&mut self, now: Instant) -> Tick {
         let Ok(fds) = self.proc.fds(self.pid) else {
-            return Tick::Skip; // A9: proc read failure -> keep the last value
+            return Tick::Skip; // docs/testing.md A9: proc read failure -> keep the last value
         };
         let Some(cur) = select_current(&fds) else {
-            // A8: no growing destination — between files, a directory op, or the file just
-            // finished and its fd is closed. Nothing is being copied, so the bar comes down.
+            // docs/testing.md A8: no growing destination — between files, a directory op, or
+            // the file just finished and its fd is closed. Nothing is being copied, so the bar
+            // comes down.
             self.current = None;
             self.candidate_sizes.clear();
             return Tick::Idle;
@@ -167,7 +174,7 @@ impl<'a, P: ProcSource, S: StatSource> Sampler<'a, P, S> {
         let cm = self.current.as_mut().expect("current set above");
         let done = match self.stat.stat(&cm.dest) {
             Ok(st) => st.copied_bytes(),
-            Err(_) => return Tick::Skip, // A9: keep the model's last value
+            Err(_) => return Tick::Skip, // docs/testing.md A9: keep the model's last value
         };
         cm.model.push(now, done);
         Tick::Sample(cm.model.snapshot(cm.name.clone()))
@@ -493,6 +500,88 @@ mod tests {
         stat.set("/tmp/decoy.log", Ok(FileStat { size: 9000 })); // +8960
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.name, "/tmp/decoy.log", "the biggest gainer is what is being written");
+    }
+
+    #[test]
+    fn equal_growth_keeps_the_candidate_seen_first() {
+        // exceptions E24. Two candidates that grew by exactly the same amount say nothing about
+        // which one `cp` is writing, so the exclusive comparison hands the tick to whichever came
+        // first in enumeration order. Nothing makes that the right answer — it is an arbitrary
+        // but stated tie-break, and the point of pinning it is that the rule is written down
+        // rather than that it is optimal.
+        let proc = FakeProc::new(vec![write_fd(4, "/dst/first"), write_fd(5, "/dst/second")]);
+        let stat = FakeStat::default();
+        stat.set("/dst/first", Ok(FileStat { size: 100 }));
+        stat.set("/dst/second", Ok(FileStat { size: 100 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+        assert_eq!(s.tick(t0), Tick::Skip, "no growth history yet -> no guess");
+
+        for n in 1..=3u64 {
+            let size = 100 + n * 500; // both grow by the same amount, every tick
+            stat.set("/dst/first", Ok(FileStat { size }));
+            stat.set("/dst/second", Ok(FileStat { size }));
+            let st = s.tick(t0 + Duration::from_millis(n * 100)).sample().unwrap();
+            assert_eq!(st.name, "/dst/first", "tick {n}: the earlier candidate takes the tie");
+        }
+    }
+
+    #[test]
+    fn a_tie_overrides_the_file_already_being_tracked() {
+        // The uncomfortable half of E24, recorded because it is what the code does rather than
+        // what one would assume from "keeps the candidate seen first": `choose_dest` looks at
+        // `self.current` only when *nothing* grew, so a tie re-elects the first candidate even
+        // when the bar was following the second. Documenting the tie-break as "sticky" would
+        // have been wrong, and only a test that starts out tracking the other file can say so.
+        let proc = FakeProc::new(vec![write_fd(4, "/dst/first"), write_fd(5, "/dst/second")]);
+        let stat = FakeStat::default();
+        stat.set("/dst/first", Ok(FileStat { size: 100 }));
+        stat.set("/dst/second", Ok(FileStat { size: 100 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+        assert_eq!(s.tick(t0), Tick::Skip);
+
+        // second out-grows first, so the bar follows second
+        stat.set("/dst/first", Ok(FileStat { size: 110 })); // +10
+        stat.set("/dst/second", Ok(FileStat { size: 900 })); // +800
+        let tracked = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
+        assert_eq!(tracked.name, "/dst/second", "the bigger gainer takes the bar");
+
+        // now both grow by 500: the tie hands it back to the first candidate
+        stat.set("/dst/first", Ok(FileStat { size: 610 }));
+        stat.set("/dst/second", Ok(FileStat { size: 1400 }));
+        let after = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
+        assert_eq!(after.name, "/dst/first", "a tie moves the bar, it does not hold it");
+    }
+
+    #[test]
+    fn reset_rate_history_clears_the_current_files_history() {
+        // A13 / #9 at the sampler level. `ProgressModel::reset_samples` is what drops the samples
+        // and is tested there, but the Ctrl-Z path reaches it through this wrapper, and the
+        // suspend tests assert on the footer rather than on the rate. Emptying this function's
+        // body therefore changed nothing any test could see.
+        let proc = FakeProc::new(file("/dst/a.iso", Some("/src/a.iso")));
+        let stat = FakeStat::default();
+        stat.set("/src/a.iso", Ok(FileStat { size: 10_000 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
+        s.tick(t0);
+        stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
+        let before = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
+        assert!(before.rate.is_some(), "two samples inside the window give a rate");
+
+        s.reset_rate_history();
+
+        // Resumed a minute later, having copied nothing while stopped. Without the reset those
+        // two facts average into a rate of ~0 for a full window; with it, one post-resume sample
+        // is simply not enough to state a rate at all.
+        stat.set("/dst/a.iso", Ok(FileStat { size: 200 }));
+        let after = s.tick(t0 + Duration::from_secs(61)).sample().unwrap();
+        assert_eq!(after.rate, None, "the stopped span must not be averaged in");
+        assert_eq!(after.name, "/dst/a.iso", "identity survives: the same file is still copying");
+        assert_eq!(after.total, Some(10_000), "and so does its total — that is not timing data");
     }
 
     #[test]

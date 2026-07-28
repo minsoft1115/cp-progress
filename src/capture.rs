@@ -21,6 +21,10 @@ use crate::verbose::LinePulse;
 /// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
 /// relay channel.
 ///
+/// The pulse fires only for reads that *completed* a line: one completed line is one new item.
+/// A read landing mid-line is not an item, and counting it as one would start that item's clock
+/// at a fragment rather than at the line naming the file (exceptions D3).
+///
 /// `-v` is injected either way, because the slow-file timer has nothing else to go on. But the
 /// bytes only reach the terminal when they were requested: cprog otherwise floods the scrollback
 /// with output the user never asked for, which is the one place it visibly differs from plain
@@ -101,6 +105,25 @@ mod tests {
         let _: Vec<u8> = rx.into_iter().flatten().collect();
         // The `-v` line registered a pulse, so the item is slow once the threshold elapses.
         assert!(slow.lock().unwrap().is_slow(t0 + Duration::from_millis(150)));
+    }
+
+    #[test]
+    fn a_chunk_without_a_line_boundary_does_not_pulse() {
+        // The other half of exceptions D3: a pulse means "a line completed", so a read that
+        // completed none must leave the timer alone. Both docs/testing.md B3 (a `-v` line split
+        // across chunks) and B7 (the bar switching at a file boundary) rest on that meaning —
+        // pulsing on every read instead would start an item's clock at whichever fragment
+        // happened to arrive rather than at the line that names it.
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        let t0 = Instant::now();
+        relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx, true);
+        drop(tx);
+        let _: Vec<u8> = rx.into_iter().flatten().collect();
+        assert!(
+            !slow.lock().unwrap().is_slow(t0 + Duration::from_secs(10)),
+            "no line completed -> no pulse -> nothing has started being timed"
+        );
     }
 
     #[test]
@@ -218,6 +241,30 @@ mod tests {
         }
         let (tx, rx) = mpsc::sync_channel(16);
         relay_bytes(AlwaysBroken, &tx);
+        drop(tx);
+        assert!(rx.into_iter().next().is_none(), "returns instead of looping");
+    }
+
+    #[test]
+    fn a_real_read_error_ends_the_stdout_relay_too() {
+        // The twin of `a_real_read_error_still_ends_the_relay`, for the *other* reader. D8 is one
+        // rule over two functions, and only `relay_bytes` had both halves pinned: turning
+        // `relay_stdout`'s guard into "retry every error" left the whole suite green, so nothing
+        // said that a permanently failing stdout ends the loop rather than spinning the thread
+        // forever — with `cp` never reaped and the footer never cleaned up.
+        //
+        // Verified by mutation the way a non-terminating rule has to be: with the guard widened,
+        // this test does not fail, it *hangs* (which is how cargo-mutants scores it — a timeout
+        // is a detection). Unmutated it returns immediately.
+        struct AlwaysBroken;
+        impl std::io::Read for AlwaysBroken {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fd is gone"))
+            }
+        }
+        let (tx, rx) = mpsc::sync_channel(16);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        relay_stdout(AlwaysBroken, &slow, &tx, true);
         drop(tx);
         assert!(rx.into_iter().next().is_none(), "returns instead of looping");
     }
