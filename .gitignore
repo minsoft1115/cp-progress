@@ -16,6 +16,11 @@
 # Local bug notes (tracked as GitHub issues instead)
 /bugs/
 
+# Local AI-assistant onboarding notes. Untracked *and* ignored on purpose: `cargo publish`
+# counts an untracked file as a dirty working tree, so leaving it unignored makes the
+# release procedure's `--locked --dry-run` step fail until it is passed --allow-dirty.
+/CLAUDE.md
+
 # Editor / OS junk
 .vscode/
 .idea/
