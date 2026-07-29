@@ -2,8 +2,10 @@
 //!
 //! `cp`'s wait status is the final authority. A normal exit returns its code verbatim
 //! (docs/testing.md D6); a signal death is preserved so the parent shell sees a true signaled
-//! exit — cprog restores the default disposition and re-raises the signal (docs/process-model.md
-//! D2).
+//! exit — cprog restores the default disposition and re-raises the signal
+//! (docs/process-model.md "시그널 보존 종료", docs/testing.md D2). `process-model.md` carries no
+//! numbered rows, so the bare `D2` used to name nothing there — and `D2` in exceptions.md is an
+//! unrelated rule about trailing bytes (#61 C).
 //!
 //! The `128 + signal` fallback is unreachable, and kept anyway. For the standard signals the
 //! re-raise goes through [`signal_hook::low_level::emulate_default_handler`], which ends in

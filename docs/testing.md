@@ -32,7 +32,8 @@
 - **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다.
 - **render/footer** — `FooterGuard`가 `Drop`에서 지움(정상 + `catch_unwind` panic);
   footer가 `height − min_log_rows`를 안 넘음.
-- **messages/exit** — 요약/경고 포맷, `ExitDisposition` 매핑, 시그널 vs `128+n` 정책.
+- **messages/exit** — 요약 포맷, `ExitDisposition` 매핑, 시그널 vs `128+n` 정책. (경고 포맷은
+  없다 — 별도 `Warning` 타입을 두지 않기로 했고 방출 sink도 없다, architecture.md 참조.)
 
 ## seam 주입 (여전히 빠름)
 
@@ -51,7 +52,8 @@
 - 진짜 자식이 진짜 임시 파일을 복사, 진짜 `/proc`로 샘플 → percent가 오르고 100%에 도달.
 - **`stdbuf` 없을 때 managed→passthrough 폴백** (PATH에서 `stdbuf`를 가린 채 실행).
 - **부분 청크 relay:** 개행이 안 끝난 바이트도 즉시 로그로 흘리는지.
-- `-v` 이중 주입 방지(사용자가 `-v`를 줬을 때).
+- ~~`-v` 이중 주입 방지~~ — 유닛(`process.rs::managed_does_not_double_inject_verbose`)이 전부다.
+  중복된 `-v`는 `cp`의 출력으로 관측되지 않으므로 통합 테스트가 볼 수 있는 것이 없다.
 - PTY 기반(`openpty`) 테스트: passthrough 출력이 `cp`와 바이트 동일; footer가 종료 전 지워짐;
   `SIGWINCH`가 재배치를 유발(+ 시그널 유실 시 폴백 재조회); `cprog`에 시그널이 오면 signaled-
   exit 보존 + footer 정리.

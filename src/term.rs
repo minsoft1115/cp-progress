@@ -244,7 +244,8 @@ mod tests {
     #[test]
     fn same_terminal_fds_matches_itself_and_separates_distinct_files() {
         // stdout stat'd twice is the same (dev, ino); two different files are not. The second
-        // half is what B4 actually guards — stdout and stderr pointing somewhere different —
+        // half is what exceptions B4 actually guards — stdout and stderr pointing somewhere
+        // different —
         // and a fabricated bad fd never exercised it.
         //
         // The `Err` arm of the composition is not reachable here: with a valid `BorrowedFd`
@@ -279,7 +280,8 @@ mod tests {
         // only `stdbuf` there, the spawn fails with EACCES and cprog exits 127 without copying
         // anything — a working `cp` turned into a failure by the wrapper. (With a real `stdbuf`
         // later on PATH, execvp skips the bad entry and nothing is lost, which is exactly why
-        // the probe must keep searching rather than answer early.) C7 is the opposite shape,
+        // the probe must keep searching rather than answer early.) Exceptions C7 is the opposite
+        // shape,
         // where cp's own tooling reports the problem.
         use std::os::unix::fs::PermissionsExt;
 

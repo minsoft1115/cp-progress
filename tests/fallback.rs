@@ -84,7 +84,8 @@ fn missing_stdbuf_falls_back_to_passthrough() {
 #[test]
 fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
     // exceptions C7, and the asymmetry is the point. With no `cp` at all the *spawn* fails and
-    // cprog reports Fatal::CpSpawn (C1, tests/exit_contract.rs). Here `stdbuf` is on PATH, so
+    // cprog reports Fatal::CpSpawn (exceptions C1, tests/exit_contract.rs). Here `stdbuf` is on
+    // PATH, so
     // managed mode engages and the spawn **succeeds** — it is `stdbuf` that then cannot exec
     // `cp`, prints its own diagnosis and exits 127. From cprog's side that is indistinguishable
     // from "cp exited 127", and it must be reported as such: cp's result is the final authority,
@@ -139,7 +140,8 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
     assert!(text.contains("stdbuf"), "the child's own diagnosis must reach the screen: {text:?}");
     // And the failure this distinguishes it from: had managed mode not engaged, cprog would have
     // exec'd `cp`, failed, and reported Fatal::CpSpawn — also exit 127, but naming the wrapper
-    // for a failure that is not the wrapper's (C1). The exit code alone cannot tell them apart.
+    // for a failure that is not the wrapper's (exceptions C1). The exit code alone cannot tell
+    // them apart.
     assert!(!text.contains("cprog:"), "cprog must not invent a Fatal of its own: {text:?}");
     assert!(!dst.exists(), "nothing was copied");
 }
