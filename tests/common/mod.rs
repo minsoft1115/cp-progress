@@ -14,6 +14,12 @@ use std::time::{Duration, Instant};
 /// Read one chunk from a PTY master, retrying on EINTR and treating EIO (the slave side fully
 /// closed) or any other error as end-of-stream. Returns 0 at EOF. This keeps the integration
 /// tests from mistaking a signal-interrupted read for the end of cprog's output.
+///
+/// **Folding every error into EOF means a caller can get an empty buffer and not know why**, so a
+/// test that only asserts an absence ("no bar", "no `ESC[K`") would pass on a read that never
+/// happened. Every such test in this suite therefore carries a positive guard first — the
+/// destination's length, `copied > 0`, a substring that must be present — and that guard is not
+/// optional (#60).
 pub fn read_retry(master: &mut File, buf: &mut [u8]) -> usize {
     loop {
         return match master.read(buf) {
@@ -86,6 +92,10 @@ pub fn readable(fd: RawFd, ms: i32) -> bool {
 
 /// Non-blocking drain of a PTY master into `out` until `deadline`, or until `marker` (searched
 /// from the given index) appears — whichever comes first.
+///
+/// Like [`read_retry`], a read error ends the drain silently rather than failing: the caller sees
+/// a short buffer, not an error. Callers must assert something *positive* before asserting an
+/// absence (#60).
 pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant, marker: Option<(usize, &[u8])>) {
     let mut buf = [0u8; 8192];
     while Instant::now() < deadline {
@@ -105,6 +115,11 @@ pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant,
 }
 
 /// A throttled writer feeding a FIFO to keep a `cp` copy slow. Stops and joins on drop.
+///
+/// A FIFO that cannot be opened turns the thread into a no-op, which turns "a slow copy" into an
+/// instant one with nothing said about it. That is deliberate — a failure here is not the test's
+/// subject — but it is another reason the tests that use it must first prove the copy was slow
+/// (a footer appeared, `copied > 0`) before concluding anything from what is missing (#60).
 pub struct Feeder {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -160,13 +175,24 @@ pub fn cprog_exec(fifo: &std::path::Path, dst: &std::path::Path) -> (CString, Ve
 
 /// Replay a captured terminal byte stream into the lines a user would actually see.
 ///
-/// Only the sequences cprog emits for the footer matter here: `\r` (column 0), `\n` (next line)
-/// and `CSI K` (erase to end of line). Everything else that is an escape sequence is skipped and
-/// ordinary bytes overwrite whatever is under the cursor. This is what makes it possible to
-/// assert on *visible* output rather than on bytes that were written and then overdrawn.
+/// Four sequences are interpreted, and they are exactly the ones `FooterGuard` emits: `\r`
+/// (column 0), `\n` (next row), `CSI K` (erase to end of line) and **`CSI A` (up one row)**.
+/// Anything else escape-like is skipped, and ordinary bytes overwrite whatever is under the
+/// cursor. That is what makes it possible to assert on *visible* output rather than on bytes that
+/// were written and then overdrawn.
+///
+/// `CSI A` is not optional decoration: the two-row footer's erase is `\r CSI K CSI A \r CSI K`,
+/// so ignoring the cursor movement clears the second row twice and leaves the first one standing
+/// — a row the terminal had wiped stays on the modelled screen, and every negative assertion
+/// ("no line starts with `:`") is then answered by a screen that never existed (#60).
+///
+/// Rows are kept in a vector rather than pushed on `\n`, because the cursor has to be able to go
+/// back to one. `src/render.rs`'s `Screen` does the same thing for the unit tests; the difference
+/// is that this replay has no bottom edge and therefore does not scroll — it is reconstructing a
+/// capture, not simulating a terminal of a fixed height.
 pub fn render_screen(bytes: &[u8]) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut cur: Vec<u8> = Vec::new();
+    let mut rows: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut row = 0usize;
     let mut col = 0usize;
     let mut i = 0usize;
     while i < bytes.len() {
@@ -176,14 +202,23 @@ pub fn render_screen(bytes: &[u8]) -> Vec<String> {
                 i += 1;
             }
             b'\n' => {
-                lines.push(String::from_utf8_lossy(&cur).into_owned());
-                cur.clear();
+                row += 1;
+                if row == rows.len() {
+                    rows.push(Vec::new());
+                }
+                // The captures come from `openpty(.., None::<&Termios>)` — a default line
+                // discipline, where ONLCR turns a newline into CR+LF — so returning to column 0
+                // is what the terminal did. `FooterGuard` writes its own `\r` before every row
+                // regardless, so cprog's output renders the same either way.
                 col = 0;
                 i += 1;
             }
             0x1b => {
                 if bytes[i..].starts_with(b"\x1b[K") {
-                    cur.truncate(col); // erase to end of line
+                    rows[row].truncate(col); // erase to end of line
+                    i += 3;
+                } else if bytes[i..].starts_with(b"\x1b[A") {
+                    row = row.saturating_sub(1); // up one row, column unchanged
                     i += 3;
                 } else {
                     // Skip any other CSI/escape sequence up to its final byte.
@@ -198,17 +233,17 @@ pub fn render_screen(bytes: &[u8]) -> Vec<String> {
                 }
             }
             b => {
-                if col < cur.len() {
-                    cur[col] = b;
+                let line = &mut rows[row];
+                if col < line.len() {
+                    line[col] = b;
                 } else {
-                    cur.resize(col, b' ');
-                    cur.push(b);
+                    line.resize(col, b' ');
+                    line.push(b);
                 }
                 col += 1;
                 i += 1;
             }
         }
     }
-    lines.push(String::from_utf8_lossy(&cur).into_owned());
-    lines
+    rows.iter().map(|l| String::from_utf8_lossy(l).into_owned()).collect()
 }

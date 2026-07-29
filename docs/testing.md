@@ -81,8 +81,10 @@
 - **기본 `cargo test`는 외부 도구 없이 완전 green** — 유닛 스위트만 돈다(‑ `cp`/`stdbuf`/PTY
   불요). 커널 `/proc`·임시파일만 쓰는 self-pid 테스트는 유닛에 포함된다.
 - **통합 테스트는 `cargo test --features integration`** — 진짜 `cp`/`stdbuf` + PTY를 쓰는
-  `tests/*.rs` 전체(passthrough·managed·signals·fallback·background·suspend·resize·quiet·
-  log_integrity)가 `integration` feature로 게이트돼, 기본 스위트의 순수성을 지킨다. 외부
+  `tests/*.rs` **전체**가 `integration` feature로 게이트돼, 기본 스위트의 순수성을 지킨다(파일을
+  일일이 세지 않는다 — 목록은 늘 뒤처진다). 그중 `harness.rs`만 성격이 다르다: 외부 도구 없이
+  공용 하네스(`tests/common/mod.rs`) 자체를 검증한다. 하네스가 터미널을 잘못 재현하면 그 위에서
+  한 모든 단언이 허구가 되므로, 렌더 재현은 하네스에서도 테스트 대상이다(#60). 외부
   도구가 필요 없는 `tests/exit_contract.rs`만 기본 스위트에 남는다.
 - 동작을 최대한 순수 유닛으로 **끌어내려** 통합 테스트를 적고 안정적으로.
 - **`cp` 결과 보존**을 테스트로 못박음: relay/footer IO 실패가 exit code를 바꾸지 않음.
