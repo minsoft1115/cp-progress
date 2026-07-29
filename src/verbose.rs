@@ -73,6 +73,8 @@ mod tests {
     #[test]
     fn newline_split_across_chunks_pulses_when_completed() {
         // docs/testing.md B3: a `-v` line straddling a read-chunk boundary.
+        // The first two assertions are also the whole of "a chunk with no newline is no
+        // pulse" — that case was a separate test pinning the same branch (#61 B).
         let mut p = LinePulse::new();
         assert_eq!(p.feed(b"'a.iso' -> "), 0); // partial line, no pulse yet
         assert!(p.pending());
@@ -101,12 +103,6 @@ mod tests {
         assert!(!p.pending());
     }
 
-    #[test]
-    fn no_trailing_newline_is_no_pulse() {
-        let mut p = LinePulse::new();
-        assert_eq!(p.feed(b"partial without newline"), 0);
-        assert!(p.pending());
-    }
 
     #[test]
     fn empty_chunk_is_no_pulse_and_preserves_pending() {

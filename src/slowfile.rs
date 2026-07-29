@@ -77,13 +77,6 @@ mod tests {
         assert!(!t.is_slow(t0 + Duration::from_millis(50)));
     }
 
-    #[test]
-    fn slow_file_above_threshold_is_slow() {
-        let mut t = timer();
-        let t0 = Instant::now();
-        t.on_pulse(t0);
-        assert!(t.is_slow(t0 + Duration::from_millis(150)));
-    }
 
     #[test]
     fn threshold_boundary_is_exclusive() {
@@ -94,6 +87,8 @@ mod tests {
         assert!(!t.is_slow(t0 + Duration::from_millis(99)), "just before -> no bar");
         assert!(!t.is_slow(t0 + THRESHOLD), "exactly threshold -> no bar (`>` is exclusive)");
         assert!(t.is_slow(t0 + THRESHOLD + Duration::from_nanos(1)), "just after -> bar");
+        // Well past it, too — the case a separate test used to make on its own (#61 B).
+        assert!(t.is_slow(t0 + Duration::from_millis(150)));
     }
 
     #[test]

@@ -3,9 +3,9 @@
 //!
 //! This is the set of tests that proves the live pipeline end to end: attach cprog's stdout/stderr
 //! to a pseudo-terminal so it enters managed mode, copy under a tiny slow threshold, and confirm
-//! from the master side that the injected `-v` lines streamed *during* the copy and the footer
-//! bar was drawn — then cleared, with a `✓` summary. The multi-file test additionally proves the
-//! *during* property by ordering: a bar must be drawn *between* consecutive `-v` lines, which a
+//! from the master side that the injected `-v` lines reached the terminal, that the footer bar
+//! was drawn, and that a `✓` summary followed. The *during* property is proved by ordering
+//! rather than by presence: a bar must appear *between* consecutive `-v` lines, which a
 //! block-buffered flush-at-end could not satisfy.
 
 use std::fs::File;
@@ -17,70 +17,6 @@ use nix::pty::{openpty, Winsize};
 mod common;
 use common::{read_retry, TmpDir};
 
-#[test]
-fn managed_streams_verbose_and_draws_footer_over_pty() {
-    let tmp = TmpDir::new("stream");
-    let src = tmp.0.join("src.bin");
-    let dst = tmp.0.join("dst.bin");
-    // Large enough that the copy spans several render ticks even on fast storage.
-    std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
-
-    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).expect("openpty");
-    let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
-    let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
-        .arg("-v") // #20: relaying only happens when the user asked for it
-        .arg(&src)
-        .arg(&dst)
-        .env("TERM", "xterm")
-        .env("LC_ALL", "C.UTF-8")
-        .env_remove("CI") // managed requires CI unset
-        // Force every file to count as "slow" and sample/redraw briskly so the footer shows.
-        .env("CPROG_SLOW_THRESHOLD_MS", "1")
-        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
-        .env("CPROG_RENDER_TICK_MS", "5")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(slave_out))
-        .stderr(Stdio::from(slave_err))
-        .spawn()
-        .expect("spawn cprog");
-
-    // Parent must hold no slave fd, or the master never sees EOF.
-    drop(pty.slave);
-
-    // Drain the master as cp writes (also unblocks cp), until the slave side closes.
-    let mut master = File::from(pty.master);
-    let mut out = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match read_retry(&mut master, &mut buf) {
-            0 => break,
-            n => out.extend_from_slice(&buf[..n]),
-        }
-    }
-    let status = child.wait().expect("wait cprog");
-
-    assert!(status.success(), "cprog exited non-zero");
-    assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "copy completed");
-
-    // A `-v` line reached the terminal at all. This does **not** show it arrived live: the
-    // master is drained to EOF, so a block-buffered flush at cp exit satisfies it just as well
-    // (measured with `stdbuf -i0`). Liveness is `managed_verbose_lines_interleave_with_footer_during_copy`,
-    // which requires a footer redraw *between* two `-v` lines (#61).
-    assert!(out.windows(2).any(|w| w == b"->"), "expected a relayed -v line");
-    // The footer bar was drawn during the copy (full-block glyph, U+2588 = E2 96 88).
-    assert!(
-        out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]),
-        "expected footer bar glyphs during the copy"
-    );
-    // The footer was cleared and a success summary printed (✓ = E2 9C 93).
-    assert!(
-        out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]),
-        "expected a ✓ summary on completion"
-    );
-}
 
 #[test]
 fn managed_verbose_lines_interleave_with_footer_during_copy() {
@@ -156,6 +92,13 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
     assert!(
         out[first..last].windows(3).any(|w| w == [0xE2, 0x96, 0x88]),
         "expected a footer redraw between streamed -v lines (live stdbuf -oL streaming)"
+    );
+
+    // A UTF-8 success summary on a real copy — the one thing the single-file test showed that
+    // this one did not, moved here rather than kept alive by a second 256 MiB copy (#61 B).
+    assert!(
+        out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]),
+        "expected a ✓ summary on completion"
     );
 
     // Each `-v` line is relayed exactly once. The render loop drains the queue into a batch and

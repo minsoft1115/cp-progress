@@ -243,6 +243,10 @@ mod tests {
     fn special_source_gives_indeterminate_total() {
         // docs/testing.md A10: source is a fifo/device -> not a RegularRead -> total unknown,
         // but the destination bar still shows (indeterminate).
+        //
+        // "A destination with no source at all" is the same branch: the kind filter leaves
+        // `sources` empty either way and `source_for` answers `None`. It had its own test, which
+        // is duplication rather than coverage (E18, #61 B).
         let mut e = stdio().to_vec();
         e.push(entry(3, "pipe:[99]", FdKind::Other)); // source fifo
         e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
@@ -251,18 +255,6 @@ mod tests {
         assert_eq!(source_for(4, &cur.sources), None);
     }
 
-    #[test]
-    fn multiple_regular_fds_pick_the_write_destination() {
-        // docs/testing.md A11: among several regular fds, the write-mode one is the growing
-        // destination.
-        let mut e = stdio().to_vec();
-        e.push(entry(3, "/src/a.iso", FdKind::RegularRead));
-        e.push(entry(4, "/dst/a.iso", FdKind::RegularWrite));
-        e.push(entry(5, "/some/other-read", FdKind::RegularRead));
-        let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
-        assert_eq!(source_for(4, &cur.sources), Some(PathBuf::from("/src/a.iso")));
-    }
 
     #[test]
     fn redirected_low_fds_are_not_selected() {
@@ -337,13 +329,6 @@ mod tests {
         assert_eq!(source_for(5, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
 
-    #[test]
-    fn dest_without_source_is_selected() {
-        let e = vec![entry(4, "/dst/a.iso", FdKind::RegularWrite)];
-        let cur = select_current(&e).unwrap();
-        assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
-        assert_eq!(source_for(4, &cur.sources), None);
-    }
 
     // ---- LinuxProcSource against our own /proc (no external tools) --------------------
 

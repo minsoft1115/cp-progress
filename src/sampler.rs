@@ -291,6 +291,11 @@ mod tests {
         // #3: a 200 MiB mostly-hole file must read 100 % when the copy finishes. `cp` produces a
         // sparse destination by default (--sparse=auto) whenever the source has holes, so this is
         // the ordinary case, not an exotic one.
+        //
+        // It stands for the whole family: sparse files, compressing filesystems and ext4 delayed
+        // allocation all leave what is on disk short of the logical length, and measuring blocks
+        // would pin the bar below 100 % in every one of them (#12). A second fixture of the same
+        // shape was coverage in name only (#61 B).
         const TOTAL: u64 = 209_715_200;
         let proc = FakeProc::new(file("/dst/holey", Some("/src/holey")));
         let stat = FakeStat::default();
@@ -308,19 +313,6 @@ mod tests {
         assert_eq!(crate::progress::percent_of(end.done, end.total), Some(100.0));
     }
 
-    #[test]
-    fn a_destination_smaller_on_disk_than_its_length_still_completes() {
-        // The shape shared by sparse files, compressing filesystems and ext4 delayed allocation:
-        // what is on disk lags the logical length. Measuring blocks would pin the bar below 100 %
-        // in all three; measuring size is right in all three (#12).
-        let proc = FakeProc::new(file("/dst/a", Some("/src/a")));
-        let stat = FakeStat::default();
-        stat.set("/src/a", Ok(FileStat { size: 1_000 }));
-        stat.set("/dst/a", Ok(FileStat { size: 1_000 }));
-        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
-        let st = s.tick(Instant::now()).sample().unwrap();
-        assert_eq!(crate::progress::percent_of(st.done, st.total), Some(100.0));
-    }
 
     // ---- basic progress ---------------------------------------------------------------
 
