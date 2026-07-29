@@ -103,7 +103,6 @@ mod tests {
         assert!(!p.pending());
     }
 
-
     #[test]
     fn empty_chunk_is_no_pulse_and_preserves_pending() {
         let mut p = LinePulse::new();

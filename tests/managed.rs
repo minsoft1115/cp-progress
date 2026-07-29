@@ -17,7 +17,6 @@ use nix::pty::{openpty, Winsize};
 mod common;
 use common::{read_retry, TmpDir};
 
-
 #[test]
 fn managed_verbose_lines_interleave_with_footer_during_copy() {
     // docs/testing.md B2, strengthened. The single-file test only proves a `->` exists

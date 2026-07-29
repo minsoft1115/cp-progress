@@ -313,7 +313,6 @@ mod tests {
         assert_eq!(crate::progress::percent_of(end.done, end.total), Some(100.0));
     }
 
-
     // ---- basic progress ---------------------------------------------------------------
 
     #[test]

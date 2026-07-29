@@ -77,7 +77,6 @@ mod tests {
         assert!(!t.is_slow(t0 + Duration::from_millis(50)));
     }
 
-
     #[test]
     fn threshold_boundary_is_exclusive() {
         // docs/testing.md B6: just-before / exact / just-after the threshold.

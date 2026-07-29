@@ -255,7 +255,6 @@ mod tests {
         assert_eq!(source_for(4, &cur.sources), None);
     }
 
-
     #[test]
     fn redirected_low_fds_are_not_selected() {
         // `cprog a b < in` in a terminal: cp inherits a regular-file stdin, which is stdio and
@@ -328,7 +327,6 @@ mod tests {
         );
         assert_eq!(source_for(5, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
-
 
     // ---- LinuxProcSource against our own /proc (no external tools) --------------------
 

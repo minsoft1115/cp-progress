@@ -113,7 +113,6 @@ mod tests {
         assert!(inspect(&args(&["-a", "--help", "src", "dst"])).unwrap().informational);
     }
 
-
     // ---- interactive detection (docs/testing.md E2, runtime-model) -----------------------------------
 
     #[test]

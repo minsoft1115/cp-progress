@@ -839,7 +839,6 @@ mod tests {
         assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain(), true), None);
     }
 
-
     #[test]
     fn footer_for_shown_when_slow_with_state() {
         let line = footer_for(Some(&state()), TerminalSize::new(80, 24), Style::plain(), false)

@@ -479,8 +479,6 @@ mod tests {
         assert_eq!(&buf.bytes()[mark..], b"\x1b[A\rb\x1b[K\n\rBB\x1b[K");
     }
 
-
-
     #[test]
     fn cursor_hidden_only_once() {
         let buf = SharedBuf::default();
