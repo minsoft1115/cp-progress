@@ -99,6 +99,13 @@ fn cp_error_during_a_slow_copy_stays_readable_on_screen() {
     );
 
     // What the user actually sees after all the overdrawing.
+    //
+    // This is an end-to-end smoke check, not the thing that holds D10 (#59). The rule exists for
+    // an error that arrives in four writes, and fragmentation cannot be ordered up: on this
+    // kernel glibc's four writes land as one contiguous run, and with the withhold rule disabled
+    // this test still passes. Forcing the fragments apart (an 8-byte stderr relay, 20 ms between
+    // reads) does turn it red, so it is not structurally blind — the scenario simply does not
+    // occur here. The five `render.rs` unit tests are what pin the rule.
     let screen = render_screen(&out);
     assert!(
         screen.iter().any(|l| l.trim_start().starts_with("cp:")),

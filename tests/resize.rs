@@ -225,3 +225,143 @@ fn an_unsized_terminal_is_laid_out_as_eighty_columns() {
     );
     assert!(eighty_max <= 80, "and the 80-column layout still fits 80 columns");
 }
+
+#[test]
+fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {
+    // exceptions F2's other half, and the one nothing held (#59). The rule is "a SIGWINCH that
+    // never arrives must not pin the layout to a stale width" — a one-second fallback re-query.
+    // `term.rs::resize_requery_rule` pins the comparison *shape* against a fallback it declares
+    // itself, so `SIZE_FALLBACK` could be changed to an hour and the whole suite stayed green.
+    // The sibling test above cannot see it either: it raises SIGWINCH, so the flag arm answers
+    // first and the two paths are indistinguishable.
+    //
+    // Losing the signal for real is easy now that #60 established the mask is inherited across
+    // exec: block SIGWINCH in the child before it becomes cprog, and no delivery is possible.
+    // signal-hook still installs its handler; the signal simply never arrives. So a relayout
+    // after the resize can only be the fallback's doing.
+    let tmp = TmpDir::new("lostwinch");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    // The `Command` is scoped: a named one keeps its `Stdio` fds — here dup'd PTY slaves — alive
+    // for a possible re-spawn, so the parent would still hold the slave and the master would
+    // never see EOF. `tests/managed.rs` documents the same trap; `pre_exec` is what forces a
+    // named binding here, and the block is what undoes it.
+    let mut child = {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cprog"));
+        cmd.arg(&fifo)
+            .arg(&dst)
+            .env("TERM", "xterm")
+            .env("LC_ALL", "C.UTF-8")
+            .env_remove("CI")
+            .env("CPROG_SLOW_THRESHOLD_MS", "1")
+            .env("CPROG_SAMPLE_INTERVAL_MS", "8")
+            .env("CPROG_RENDER_TICK_MS", "8")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out_fd))
+            .stderr(Stdio::from(err_fd));
+        // SAFETY: `pthread_sigmask` is async-signal-safe and touches only this forked child.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGWINCH);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        cmd.spawn().unwrap()
+    };
+    let master_fd = pty.master.as_raw_fd();
+    let cprog_pid = Pid::from_raw(child.id() as i32);
+    drop(pty.slave);
+
+    let stop_feed = Arc::new(AtomicBool::new(false));
+    let feeder = {
+        let (fifo, stop) = (fifo.clone(), Arc::clone(&stop_feed));
+        std::thread::spawn(move || {
+            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            let chunk = vec![0u8; 64 * 1024];
+            while !stop.load(Ordering::Relaxed) {
+                if w.write_all(&chunk).is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        })
+    };
+
+    let hung = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (hung, done) = (Arc::clone(&hung), Arc::clone(&done));
+        std::thread::spawn(move || {
+            for _ in 0..100 {
+                std::thread::sleep(Duration::from_millis(100));
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            hung.store(true, Ordering::Relaxed);
+            let _ = kill(cprog_pid, Signal::SIGKILL);
+        })
+    };
+
+    let track: [u8; 3] = [0xE2, 0x96, 0x91]; // ░
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut resize_off: Option<usize> = None;
+    let mut narrow_seen = false;
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => {
+                out.extend_from_slice(&buf[..n]);
+                match resize_off {
+                    None => {
+                        if out.windows(3).any(|w| w == track) {
+                            let narrow =
+                                Winsize { ws_row: 24, ws_col: 30, ws_xpixel: 0, ws_ypixel: 0 };
+                            // No `killpg` here — and the kernel's own SIGWINCH cannot be
+                            // delivered either, because it is blocked in cprog.
+                            unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &narrow) };
+                            resize_off = Some(out.len());
+                        }
+                    }
+                    Some(off)
+                        if !narrow_seen
+                            && footer_widths(&out[off..]).iter().any(|&w| w <= 30) =>
+                    {
+                        narrow_seen = true;
+                        stop_feed.store(true, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    child.wait().unwrap();
+    done.store(true, Ordering::Relaxed);
+    stop_feed.store(true, Ordering::Relaxed);
+    let _ = feeder.join();
+    let _ = watchdog.join();
+
+    assert!(resize_off.is_some(), "footer never appeared, so the resize was not exercised");
+    assert!(
+        !hung.load(Ordering::Relaxed),
+        "cprog hung: with SIGWINCH lost, only the fallback re-query can find the new width"
+    );
+    assert!(
+        narrow_seen,
+        "no narrow footer after a resize whose SIGWINCH never arrived — the fallback re-query \
+         did not happen"
+    );
+}
