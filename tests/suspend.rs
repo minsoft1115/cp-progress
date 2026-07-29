@@ -219,6 +219,12 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
             nap(400); // long enough that a wrongly-unsuppressed footer would have drawn
             libc::kill(b, libc::SIGTSTP); // second Ctrl-Z, taken by the still-installed flag
             libc::waitpid(b, &mut st, libc::WUNTRACED);
+            // A marker on the terminal so the parent can date the `fg`. Without it the only
+            // anchor is the last cursor-show, which is the *first* suspend's (the second
+            // `suspend_restore` writes nothing — the cursor is already visible), and then a
+            // background redraw would satisfy the assertion just as well as the recovery (#61).
+            let mark = b"<FG>";
+            libc::write(1, mark.as_ptr() as *const libc::c_void, mark.len());
             libc::tcsetpgrp(0, b); // `fg`: cprog is the foreground group again
             libc::kill(b, libc::SIGCONT);
             nap(800); // the resumed render loop re-checks the foreground and redraws
@@ -238,12 +244,13 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
 
     // Scenario exercised: the footer engaged, and the first suspend restored the cursor.
     assert!(contains(&out, b"\x1b[?25l"), "footer never engaged; scenario not exercised");
-    let last_show = rfind(&out, b"\x1b[?25h").expect("suspend should have shown the cursor");
-    // The inverse of the background test above: after the last cursor-show (the background
-    // resume draws nothing, so it comes from a suspend restore), the second Ctrl-Z + `fg` cycle
-    // must bring the footer back — a cursor-hide has to follow.
+    assert!(rfind(&out, b"\x1b[?25h").is_some(), "suspend should have shown the cursor");
+    // The inverse of the background test above: the footer must come back *after the `fg`*, so
+    // the hide is required after the marker the child wrote at that moment. Anchoring on the last
+    // cursor-show instead would also accept a footer wrongly redrawn while backgrounded.
+    let fg = rfind(&out, b"<FG>").expect("the child should have marked the fg moment");
     assert!(
-        contains(&out[last_show..], b"\x1b[?25l"),
+        contains(&out[fg..], b"\x1b[?25l"),
         "footer must come back after a second Ctrl-Z followed by fg (suppression is per-resume, not permanent)"
     );
 }

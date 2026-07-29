@@ -65,8 +65,11 @@ fn managed_streams_verbose_and_draws_footer_over_pty() {
     assert!(status.success(), "cprog exited non-zero");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "copy completed");
 
-    // The injected -v line streamed live (block-buffering would have hidden it until the end).
-    assert!(out.windows(2).any(|w| w == b"->"), "expected a streamed -v line");
+    // A `-v` line reached the terminal at all. This does **not** show it arrived live: the
+    // master is drained to EOF, so a block-buffered flush at cp exit satisfies it just as well
+    // (measured with `stdbuf -i0`). Liveness is `managed_verbose_lines_interleave_with_footer_during_copy`,
+    // which requires a footer redraw *between* two `-v` lines (#61).
+    assert!(out.windows(2).any(|w| w == b"->"), "expected a relayed -v line");
     // The footer bar was drawn during the copy (full-block glyph, U+2588 = E2 96 88).
     assert!(
         out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]),
@@ -195,7 +198,11 @@ fn a_c_locale_copy_emits_nothing_outside_ascii() {
     // tomorrow's.
     let tmp = TmpDir::new("clocale");
     let src = tmp.0.join("src.bin");
-    let dst = tmp.0.join("dst.bin");
+    // Long enough that the 80-column name row has to truncate it. Without that the ellipsis —
+    // one of the four glyph positions this test enumerates — is never rendered, and the
+    // enumeration is a claim the run does not make: forcing `…` unconditionally in `name_row`
+    // left this test green (#61).
+    let dst = tmp.0.join(format!("dst_{}.bin", "x".repeat(90)));
     // The whole point is "any byte above 127 is cprog's", and the footer's name row prints the
     // destination path. A non-ASCII TMPDIR would fail this test for a reason that has nothing to
     // do with cprog, so skip rather than mislead.
@@ -344,8 +351,14 @@ fn preserve_all_still_gets_the_managed_tui() {
 
 #[test]
 fn managed_relays_cp_error_and_preserves_exit_code() {
-    // docs/testing.md D1: cp fails under managed mode -> cprog relays the error, and returns
-    // cp's exit code with a ✗ summary (no footer residue).
+    // docs/testing.md D1: a cp that fails keeps its exit code, its error reaches the terminal,
+    // and no summary is invented for a run that never showed a bar.
+    //
+    // Deliberately *not* claimed: that any of this is managed-mode behaviour. cp fails instantly,
+    // so no footer, no log-area relay and no `✗` ever occur, and every assertion below holds
+    // under `CPROG_PASSTHROUGH=1` too (measured). The header used to promise "a ✗ summary" while
+    // the last assertion denies it; C2's relay-and-erase半 is pinned by the units and by
+    // `managed_verbose_lines_interleave_with_footer_during_copy` (#61).
     let tmp = TmpDir::new("cperr");
     let src = tmp.0.join("src.bin");
     std::fs::write(&src, b"hi").unwrap();

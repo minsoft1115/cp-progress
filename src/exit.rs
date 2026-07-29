@@ -116,10 +116,17 @@ mod tests {
     }
 
     #[test]
-    fn signal_falls_back_to_128_plus_n() {
-        // "불가하면 128 + n" (docs/process-model.md): the numeric code a shell reports.
+    fn signal_maps_to_128_plus_n() {
+        // The arithmetic `ExitDisposition::code()` performs, and nothing more. `finalize` never
+        // returns it: A1a ② and F15 ⑤ record that both re-raise branches either abort or cannot
+        // meet a blocked signal, so the fallback is unreachable.
+        //
+        // The old name and comment presented these two as the fallback in action, and picked the
+        // two signals that provably cannot reach it — SIGINT ends in `abort()` inside
+        // `emulate_default_handler`, and SIGKILL never returns to anyone (#61).
         assert_eq!(disposition(ExitStatus::from_raw(2)).code(), 130); // SIGINT
         assert_eq!(disposition(ExitStatus::from_raw(9)).code(), 137); // SIGKILL
+        assert_eq!(disposition(ExitStatus::from_raw(libc::SIGRTMIN())).code(), 128 + libc::SIGRTMIN());
     }
 
     #[test]

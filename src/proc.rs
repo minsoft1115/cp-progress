@@ -211,8 +211,11 @@ mod tests {
     }
 
     #[test]
-    fn both_inherited_read_and_write_fds_are_excluded() {
-        // The two decoys together: fd 3 write (#6) and fd 4 read (#11).
+    fn with_both_decoys_present_only_the_read_one_is_excluded_here() {
+        // The two decoys together: fd 3 write (#6) and fd 4 read (#11). Only the read decoy is
+        // dropped at this layer — `select_current` reports *every* write candidate and leaves the
+        // choice to growth in `sampler::choose_dest` (E17). The old name promised both, while the
+        // assertion below says the write decoy is included, which is the honest half (#61).
         let mut e = stdio().to_vec();
         e.push(entry(3, "/tmp/decoy.log", FdKind::RegularWrite));
         e.push(entry(4, "/etc/passwd", FdKind::RegularRead));
@@ -297,14 +300,22 @@ mod tests {
     }
 
     #[test]
-    fn real_dest_preferred_over_redirected_stdout() {
+    fn a_regular_file_on_a_stdio_number_is_still_not_a_candidate() {
+        // The fd-number rule at its boundary, with a real destination present so the filter has
+        // something to choose *between*.
+        //
+        // The old name and comment called fd 1 a "stdout redirect", which cannot occur: a
+        // redirected stdout is not a terminal, so the run is passthrough (B1/B2), and managed
+        // always hands cp a pipe there (E11). The rule is worth stating as what it is — a number
+        // filter — rather than as a scenario the mode selection rules out (#61).
         let e = vec![
-            entry(1, "/redirect/out", FdKind::RegularWrite), // stdout redirect, ignored
+            entry(1, "/some/regular/file", FdKind::RegularWrite),
             entry(3, "/src/a.iso", FdKind::RegularRead),
             entry(4, "/dst/a.iso", FdKind::RegularWrite),
         ];
         let cur = select_current(&e).unwrap();
         assert_eq!(cur.dests, vec![(4, PathBuf::from("/dst/a.iso"))]);
+        assert_eq!(source_for(4, &cur.sources), Some(PathBuf::from("/src/a.iso")));
     }
 
     #[test]

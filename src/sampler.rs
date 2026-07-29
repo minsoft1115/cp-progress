@@ -487,10 +487,15 @@ mod tests {
     }
 
     #[test]
-    fn a_growing_decoy_does_not_hijack_a_tracked_destination() {
-        // If the decoy grows more than the destination in one tick it does win — but only
-        // because it is genuinely the file being written to. Verify the mechanism is symmetric
-        // so the rule stays "the growing file", not "the file we happened to pick first".
+    fn the_biggest_gainer_wins_even_when_it_is_the_inherited_fd() {
+        // The mechanism is symmetric, and that is the point: the rule is "the growing file", not
+        // "the file we picked first". If the inherited fd is the one actually being written to,
+        // it wins — which is right, because then it is not a decoy at all.
+        //
+        // The old name promised the opposite of the assertion below, and spoke of a "tracked"
+        // destination when nothing was tracked yet: tick one returns `Skip`, which returns before
+        // `self.current` is ever set. The tracked case is
+        // `a_tie_overrides_the_file_already_being_tracked` (#61).
         let proc = FakeProc::new(decoy_and_dest());
         let stat = FakeStat::default();
         stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
@@ -504,6 +509,15 @@ mod tests {
         stat.set("/tmp/decoy.log", Ok(FileStat { size: 9000 })); // +8960
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.name, "/tmp/decoy.log", "the biggest gainer is what is being written");
+
+        // The decoy is also the *first* candidate, so the assertion above is equally satisfied by
+        // "the first file that grew at all" — the rule and a much weaker one agree here. Reversing
+        // the amounts separates them: now the bigger gainer is the second candidate, and only a
+        // comparison on size picks it (#61).
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 9010 })); // +10
+        stat.set("/dst/a.iso", Ok(FileStat { size: 9000 })); // +8890
+        let st = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
+        assert_eq!(st.name, "/dst/a.iso", "size decides, not position");
     }
 
     #[test]
@@ -676,6 +690,17 @@ mod tests {
         let st = s.tick(t0 + Duration::from_millis(100)).sample().unwrap();
         assert_eq!(st.total, Some(77));
         assert_eq!(st.done, 10);
+
+        // A *different* path would be established from scratch anyway — `is_new` compares paths,
+        // so the assertions above cannot see whether Idle cleared anything. The same destination
+        // coming back is what needs the clear: a model that survived would still hold the
+        // pre-Idle sample and could state a rate, and a fresh one cannot (#61).
+        proc.set(vec![]);
+        assert_eq!(s.tick(t0 + Duration::from_millis(150)), Tick::Idle);
+        proc.set(file("/dst/b", Some("/src/b")));
+        stat.set("/dst/b", Ok(FileStat { size: 20 }));
+        let again = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
+        assert_eq!(again.rate, None, "the same file after Idle starts a fresh model");
     }
 
     #[test]
@@ -690,8 +715,10 @@ mod tests {
 
     #[test]
     fn no_current_file_is_idle() {
-        // docs/testing.md A8: no growing destination -> nothing to sample, and the bar comes
-        // down (Idle) — as opposed to a failed read, which keeps the last value (Skip).
+        // docs/testing.md A8: **no write candidate at all** -> nothing to sample, and the bar
+        // comes down (Idle). "No *growing* destination" is the other verdict — a candidate that
+        // merely did not grow is `Skip`, pinned by `growing_candidate_wins_over_an_inherited_write_fd`
+        // — and this file exists to keep the two apart, so the wording matters (#61).
         let proc = FakeProc::new(vec![read_fd(3, "/src/a.iso")]); // read only, no write
         let stat = FakeStat::default();
         let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
@@ -740,11 +767,21 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         assert_eq!(st.copied_bytes(), LEN + 3, "the full logical length, holes included");
-        // Filesystems without hole support would allocate the whole range; nothing to compare.
-        if blocks.saturating_mul(512) < st.size {
+        // The claim worth pinning is about the *kernel*, not about `copied_bytes`: a hole really
+        // does leave the block count far short of the length, which is what would have stalled a
+        // block-based bar. Comparing blocks against `copied_bytes()` restates the guard above it
+        // — `copied_bytes` returns `size` — so it could never fail (#61).
+        //
+        // Filesystems without hole support allocate the whole range; there the premise is absent,
+        // and saying so is better than a comparison that quietly passes either way.
+        let on_disk = blocks.saturating_mul(512);
+        if on_disk >= LEN {
+            eprintln!("note: {path:?} has no hole support ({on_disk} bytes allocated); the \
+                       block-vs-length half of this test did not apply");
+        } else {
             assert!(
-                blocks.saturating_mul(512) < st.copied_bytes(),
-                "on-disk blocks trail the length here — measuring them would stall the bar"
+                on_disk < LEN / 2,
+                "a 64 MiB hole must leave the block count far short of the length, got {on_disk}"
             );
         }
     }

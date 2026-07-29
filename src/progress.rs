@@ -355,13 +355,31 @@ mod tests {
 
     #[test]
     fn without_reset_a_long_stop_drags_the_rate_to_zero() {
-        // The behaviour being fixed: the window is wall-clock based, so a suspend looks like
-        // "no progress for a minute" and the rate collapses for a full window after resuming.
+        // The behaviour #9 fixes: the window is wall-clock based, so a suspend looks like "no
+        // progress for a minute" and the rate collapses for a full window **after resuming**.
+        //
+        // The resume is the part that matters and the old fixture did not have one — it stopped
+        // at two flat samples, which is the plain zero-delta path (A7) that `rate_zero_when_no_increase`
+        // already covers, and where the sixty-second span cannot change a zero quotient anyway (#61).
         let mut m = model(Some(1000));
         let t0 = Instant::now();
         m.push(t0, 200);
         m.push(t0 + Duration::from_secs(60), 200); // stopped the whole time
-        assert!(approx(m.rate().unwrap(), 0.0));
+        assert!(approx(m.rate().unwrap(), 0.0), "no progress across the stop");
+
+        // Now copying again, briskly: 300 bytes in the 100 ms since resuming = 3000 B/s. With the
+        // stop still in the window the average is a hundredth of that, and the user sees a rate
+        // and an eta that describe a minute of standing still rather than the copy in front of
+        // them. `reset_samples` is what removes it.
+        let resumed = t0 + Duration::from_millis(60_100);
+        m.push(resumed, 500);
+        let dragged = m.rate().unwrap();
+        assert!(dragged < 10.0, "the stop is still averaged in: {dragged} B/s");
+
+        let mut fresh = model(Some(1000));
+        fresh.push(t0 + Duration::from_secs(60), 200);
+        fresh.push(resumed, 500);
+        assert!(approx(fresh.rate().unwrap(), 3000.0), "what the copy is actually doing");
     }
 
     #[test]
