@@ -231,6 +231,23 @@ mod tests {
     }
 
     #[test]
+    fn rate_needs_a_positive_span_not_only_two_samples() {
+        // `rate`'s contract has two ways to be unknown — too few samples, and a zero span — and
+        // only the first was pinned. Without the span guard this divides by zero and hands `inf`
+        // to the footer's rate formatter (#59).
+        //
+        // The sampler cannot produce this: it pushes at tick instants, which differ. So the test
+        // states the model's own contract rather than a reachable production state — the model is
+        // a pure unit with a documented rule, and that rule was unchecked.
+        let mut m = model(Some(1000));
+        let t0 = Instant::now();
+        m.push(t0, 100);
+        m.push(t0, 200); // a real delta, no elapsed time
+        assert_eq!(m.rate(), None, "a zero span is not a rate");
+        assert_eq!(m.eta(), None, "and no eta can be derived from one");
+    }
+
+    #[test]
     fn rate_zero_when_no_increase() {
         // docs/testing.md A7: no increase between samples -> rate ~= 0.
         let mut m = model(Some(1000));
@@ -296,6 +313,20 @@ mod tests {
         m.push(t0, 100);
         m.push(t0 + Duration::from_secs(1), 200); // done == total
         assert_eq!(m.eta(), Some(Duration::ZERO));
+
+        // With a rate in hand, `remaining / rate` is 0 anyway — so that pair says nothing about
+        // the branch above it. A finished file with *no* usable rate is what needs it: one
+        // sample, or a stalled one, must still read `0:00` rather than `--:--` at 100 % (#59).
+        let mut one = model(Some(200));
+        one.push(t0, 200);
+        assert_eq!(one.rate(), None, "one sample gives no rate");
+        assert_eq!(one.eta(), Some(Duration::ZERO), "complete is complete without a rate");
+
+        let mut stalled = model(Some(200));
+        stalled.push(t0, 200);
+        stalled.push(t0 + Duration::from_secs(1), 200); // complete, and not moving
+        assert!(approx(stalled.rate().unwrap(), 0.0));
+        assert_eq!(stalled.eta(), Some(Duration::ZERO), "a zero rate at 100 % is still done");
     }
 
     // ---- snapshot DTO ----------------------------------------------------------------

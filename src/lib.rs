@@ -484,6 +484,33 @@ fn restore_default_suspend() {
 }
 
 #[cfg(test)]
+mod shared_state {
+    use super::*;
+
+    /// H5: a thread that panicked while holding one of the shared values must not take the main
+    /// loop with it. The values behind these mutexes — the slow-file timer and the latest
+    /// progress snapshot — have no invariant a panicking holder could leave broken, and dying
+    /// here would mean never reaching `child.wait()`, which is the one thing cprog must not miss.
+    ///
+    /// Nothing tested this at all before (#59). `unwrap()` in place of the recovery is the whole
+    /// mutation, and it turns a cprog-side panic into a lost exit code.
+    #[test]
+    fn a_poisoned_mutex_is_recovered_rather_than_fatal() {
+        let m = Mutex::new(7u32);
+        let poisoner = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = m.lock().unwrap();
+            panic!("a reader thread died holding the lock");
+        }));
+        assert!(poisoner.is_err(), "the closure really did panic");
+        assert!(m.lock().is_err(), "so the mutex really is poisoned");
+
+        assert_eq!(*lock_shared(&m), 7, "the value is still there and still readable");
+        *lock_shared(&m) = 9;
+        assert_eq!(*lock_shared(&m), 9, "and still writable — the loop carries on");
+    }
+}
+
+#[cfg(test)]
 mod env_knobs {
     use super::*;
 

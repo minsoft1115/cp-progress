@@ -154,6 +154,21 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
         out[first..last].windows(3).any(|w| w == [0xE2, 0x96, 0x88]),
         "expected a footer redraw between streamed -v lines (live stdbuf -oL streaming)"
     );
+
+    // Each `-v` line is relayed exactly once. The render loop drains the queue into a batch and
+    // writes it in one go; dropping the `batch.clear()` between iterations re-writes everything
+    // still in the batch on every wake-up, and nothing noticed — one line came out eight times
+    // against two at baseline (#59). Counting is the cheapest way to see it, and it is the same
+    // property a reader cares about: cp said this once, so the screen says it once.
+    let text = String::from_utf8_lossy(&out);
+    for i in 0..N {
+        let name = format!("src{i}.bin' ->");
+        assert_eq!(
+            text.matches(&name).count(),
+            1,
+            "`{name}` must be relayed exactly once, not re-flushed with the next batch"
+        );
+    }
 }
 
 /// Read a PTY master to EOF.
