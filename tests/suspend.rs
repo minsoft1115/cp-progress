@@ -247,3 +247,207 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
         "footer must come back after a second Ctrl-Z followed by fg (suppression is per-resume, not permanent)"
     );
 }
+
+#[test]
+fn ctrl_z_during_teardown_still_stops_the_process() {
+    // exceptions A11, and the half nothing held (#59). When the render loop ends, cprog puts
+    // SIGTSTP back to `SIG_DFL`; `lib.rs::restore_default_suspend` is unit-tested, but that the
+    // loop *calls* it was not, and deleting the call left all 261 tests green.
+    //
+    // What the call buys: during teardown the loop is gone, so nobody reads the suspend flag any
+    // more. With signal-hook's flag handler still installed, a Ctrl-Z there would neither stop
+    // the process nor let it continue — a wedge. Restored, the kernel's default action applies
+    // and the process really stops, which is what this test observes.
+    //
+    // The teardown window is made wide on purpose: the sampler thread checks its stop flag
+    // between ticks, so a three-second sample interval makes its join take about that long. A
+    // FIFO with no data keeps cp deterministic (it blocks in `read`) exactly as in
+    // `tests/signals.rs`.
+    use nix::sys::signal::{kill, Signal};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, Stdio};
+
+    let tmp = TmpDir::new("teardown_tstp");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
+
+    let ws = nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd = pty.slave.try_clone().unwrap();
+    let err_fd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&fifo)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "3000") // widen the sampler join = the teardown window
+        .process_group(0) // signal cprog alone
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+    let pid = Pid::from_raw(child.id() as i32);
+
+    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let mut master = File::from(pty.master);
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&master);
+
+    // Wait for the footer to engage, so the render loop is definitely running.
+    let mut out = Vec::new();
+    drain(&mut master, fd, &mut out, Instant::now() + Duration::from_millis(3000), Some((0, b"\x1b[?25l")));
+    assert!(contains(&out, b"\x1b[?25l"), "footer never engaged; scenario not exercised");
+
+    // End the render loop, then arrive with Ctrl-Z while it is tearing down.
+    kill(pid, Signal::SIGTERM).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    kill(pid, Signal::SIGTSTP).unwrap();
+
+    let deadline = Instant::now() + Duration::from_millis(2000);
+    let mut stopped = false;
+    while Instant::now() < deadline {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Stopped(_, sig)) => {
+                assert_eq!(sig, Signal::SIGTSTP, "stopped by the signal we sent");
+                stopped = true;
+                break;
+            }
+            Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(20)),
+            other => panic!("cprog left teardown without stopping: {other:?}"),
+        }
+    }
+    assert!(stopped, "SIGTSTP during teardown was swallowed instead of stopping the process");
+
+    kill(pid, Signal::SIGCONT).unwrap();
+    let status = child.wait().unwrap();
+    assert!(status.signal().is_some(), "cprog still exits signaled, got {status:?}");
+}
+
+#[test]
+fn resuming_drops_the_rate_history_that_spans_the_stop() {
+    // exceptions A13, the bridge nothing held (#59). `progress::reset_samples` and
+    // `sampler::reset_rate_history` are both tested, but that the render loop *tells* the sampler
+    // it was resumed — the `resumed` flag between them — was not, and removing it left the suite
+    // green.
+    //
+    // What it costs when it breaks is visible in the footer: the window is wall-clock, so a stop
+    // that spans it reads as "no throughput" and the rate collapses to `0 B/s` for a whole window
+    // after resuming, instead of going honestly unknown (`-- MiB/s`) until real samples exist.
+    // That difference is the assertion: `--` can only come from a model that was emptied.
+    //
+    // Only stop and continue are needed here, not the foreground dance of the tests above: the
+    // rule is about the rate, not about who owns the terminal.
+    use nix::sys::signal::{kill, Signal};
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let tmp = TmpDir::new("resumed_rate");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
+
+    let ws = nix::pty::Winsize { ws_row: 24, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd = pty.slave.try_clone().unwrap();
+    let err_fd = pty.slave.try_clone().unwrap();
+
+    // Scoped so the parent stops holding the dup'd slaves (see `tests/managed.rs`).
+    let mut child = {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cprog"));
+        cmd.arg(&fifo)
+            .arg(&dst)
+            .env("TERM", "xterm")
+            .env("LC_ALL", "C.UTF-8")
+            .env_remove("CI")
+            .env("CPROG_SLOW_THRESHOLD_MS", "1")
+            .env("CPROG_RENDER_TICK_MS", "8")
+            // Wide enough that the one post-resume tick with a single sample — the `--` window —
+            // is drawn many times before a second sample makes a rate again.
+            .env("CPROG_SAMPLE_INTERVAL_MS", "300")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out_fd))
+            .stderr(Stdio::from(err_fd));
+        cmd.spawn().unwrap()
+    };
+    drop(pty.slave);
+    let pid = Pid::from_raw(child.id() as i32);
+
+    let _feeder = Feeder::start(fifo.clone());
+    let mut master = File::from(pty.master);
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&master);
+    let mut out = Vec::new();
+
+    // A real rate first: the bar must have been up long enough for two samples.
+    //
+    // Read the rate out of the *most recent* frame only. `strip_sgr` drops the control
+    // characters, so a footer redrawn in place becomes one concatenation of every frame ever
+    // drawn — and the first frames legitimately say `-- MiB/s`, before two samples existed.
+    // Asking the whole history whether it contains `--` always answers yes, whatever the screen
+    // says now.
+    let last_rate = |data: &[u8]| -> Option<String> {
+        let t = common::strip_sgr(&data[data.len().saturating_sub(4096)..]);
+        let end = t.rfind("/s)")?;
+        let start = t[..end].rfind('(')?;
+        Some(t[start..end + 3].to_string())
+    };
+    let deadline = Instant::now() + Duration::from_millis(8000);
+    while Instant::now() < deadline {
+        drain(&mut master, fd, &mut out, Instant::now() + Duration::from_millis(100), None);
+        if last_rate(&out).is_some_and(|r| !r.contains("--")) {
+            break;
+        }
+    }
+    assert!(
+        last_rate(&out).is_some_and(|r| !r.contains("--")),
+        "a real rate never appeared, so the scenario was not exercised: {:?}",
+        last_rate(&out)
+    );
+
+    kill(pid, Signal::SIGTSTP).unwrap();
+    let stop_deadline = Instant::now() + Duration::from_millis(2000);
+    let mut stopped = false;
+    while Instant::now() < stop_deadline {
+        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Stopped(..)) => {
+                stopped = true;
+                break;
+            }
+            _ => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    assert!(stopped, "cprog never stopped on SIGTSTP");
+
+    // Long enough that a surviving window would be mostly dead time.
+    std::thread::sleep(Duration::from_millis(1200));
+    let mark = out.len();
+    kill(pid, Signal::SIGCONT).unwrap();
+
+    let resume_deadline = Instant::now() + Duration::from_millis(4000);
+    let mut unknown_after_resume = false;
+    while Instant::now() < resume_deadline {
+        drain(&mut master, fd, &mut out, Instant::now() + Duration::from_millis(100), None);
+        if common::strip_sgr(&out[mark..]).contains("-- MiB/s") {
+            unknown_after_resume = true;
+            break;
+        }
+    }
+    let _ = kill(pid, Signal::SIGKILL);
+    let _ = child.wait();
+
+    assert!(
+        unknown_after_resume,
+        "after resuming, the rate must go unknown rather than carry a window full of dead time: {:?}",
+        common::strip_sgr(&out[mark..])
+    );
+}

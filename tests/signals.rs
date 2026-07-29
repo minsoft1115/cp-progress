@@ -474,3 +474,112 @@ fn a_signal_cprog_does_not_register_keeps_its_default_action() {
         "no teardown erase is expected here: dying of an uncaught signal leaves the footer up"
     );
 }
+
+/// The single-letter state field of `/proc/<pid>/stat` (`T` = stopped), or `None` if the process
+/// is gone. Read past the comm field, which may itself contain spaces or parentheses.
+fn proc_state(pid: i32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rfind(") ")? + 2;
+    stat[after_comm..].chars().next()
+}
+
+#[test]
+fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
+    // exceptions A8, and the half nothing held (#59): the signal cprog forwards to `cp` is sent
+    // **with a `SIGCONT` companion**. A stopped process does not act on SIGTERM — only SIGCONT or
+    // SIGKILL wakes it — so without the companion cp stays stopped, its pipes stay open, and the
+    // reader joins never finish. Every existing test signals a *running* cp, where the companion
+    // is a no-op, which is why deleting it left all 261 tests green.
+    //
+    // Same rig as `sigterm_to_cprog_alone_terminates_without_hanging`: a FIFO with no data pins cp
+    // in `read`, so its state is deterministic rather than a copy-speed race.
+    let tmp = TmpDir::new("stopped");
+    let fifo = tmp.0.join("src.fifo");
+    let dst = tmp.0.join("dst.bin");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty(Some(&ws), None).unwrap();
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&fifo)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .process_group(0) // cprog alone, so the signal does not reach cp by the group
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .unwrap();
+    drop(pty.slave);
+    let cprog_pid = Pid::from_raw(child.id() as i32);
+
+    let hung = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watchdog = {
+        let (hung, done) = (Arc::clone(&hung), Arc::clone(&done));
+        std::thread::spawn(move || {
+            for _ in 0..80 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                if done.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            hung.store(true, Ordering::Relaxed);
+            let _ = kill(cprog_pid, Signal::SIGKILL);
+        })
+    };
+
+    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    let mut stopped_cp = None;
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => {
+                out.extend_from_slice(&buf[..n]);
+                // The footer's cursor-hide means cp is running and the slow timer has fired.
+                if stopped_cp.is_none() && common::contains(&out, b"\x1b[?25l") {
+                    let cp = Pid::from_raw(cp_child_of(cprog_pid.as_raw()).expect("cp child"));
+                    kill(cp, Signal::SIGSTOP).unwrap(); // the state A8 exists for
+                    // `kill` returns once the signal is queued, so wait for the stop to actually
+                    // take effect. Forwarding to a cp that has not stopped yet would prove
+                    // nothing — it would be the ordinary path every other test already covers.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while std::time::Instant::now() < deadline && proc_state(cp.as_raw()) != Some('T') {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    assert_eq!(proc_state(cp.as_raw()), Some('T'), "cp did not stop");
+                    stopped_cp = Some(cp);
+                    kill(cprog_pid, Signal::SIGTERM).unwrap();
+                }
+            }
+        }
+    }
+    let status = child.wait().unwrap();
+    done.store(true, Ordering::Relaxed);
+    let _ = watchdog.join();
+
+    let cp = stopped_cp.expect("cp never started, so the scenario was not exercised");
+    // Only if that pid is still cp: on the failure path cp is left stopped and PDEATHSIG cannot
+    // reach it, so something must clean it up — but a reaped pid can be reused, and killing a
+    // stranger is worse than leaking. The comm check makes the cleanup safe either way.
+    if std::fs::read_to_string(format!("/proc/{}/comm", cp.as_raw())).is_ok_and(|c| c.trim() == "cp") {
+        let _ = kill(cp, Signal::SIGKILL);
+    }
+    assert!(
+        !hung.load(Ordering::Relaxed),
+        "cprog hung: a stopped cp was never continued, so its pipes never closed"
+    );
+    assert!(status.signal().is_some(), "cprog should still exit signaled, got {status:?}");
+}
