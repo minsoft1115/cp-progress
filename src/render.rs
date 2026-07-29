@@ -230,7 +230,11 @@ mod tests {
     const SHOW: &[u8] = b"\x1b[?25h";
 
     /// A terminal of fixed height that scrolls, so the cursor arithmetic can be checked against
-    /// something with a bottom edge (docs/ui.md invariant 7, #35).
+    /// something with a bottom edge (docs/testing.md C9, #35).
+    ///
+    /// Not ui.md invariant 7 — that one is about a row being wider than the terminal, and neither
+    /// `Screen` nor `FooterGuard` has a width. The rule here is the bottom edge: the erase must
+    /// rewind exactly one row and a tick redraw must not scroll (#61 C).
     ///
     /// [`SharedBuf`] records bytes; it has no rows, so a footer drawn on the last line — where
     /// its own `\n` scrolls the screen — behaves exactly like one drawn in the middle. That is
@@ -347,7 +351,7 @@ mod tests {
 
     #[test]
     fn a_footer_at_the_bottom_row_survives_the_scroll_it_causes() {
-        // #35 / docs/ui.md invariant 7. Once the footer reaches the last line, the `\n` between
+        // #35 / docs/testing.md C9. Once the footer reaches the last line, the `\n` between
         // its two rows scrolls the screen — and the next erase still walks up exactly one row.
         // Get that wrong and every following write lands a line off, silently eating log output.
         //

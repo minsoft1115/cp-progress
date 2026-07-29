@@ -349,7 +349,8 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
 #[test]
 fn help_over_pty_passes_through_but_names_cprog() {
     // `--help` prints and exits without copying; even in a terminal cprog must pass through —
-    // no footer, no `✓ done` summary (bug2/#2). Over a PTY managed would otherwise engage.
+    // no footer, no `✓ done` summary (exceptions B12). Over a PTY managed would otherwise
+    // engage. (#2 is the Ctrl-Z issue — an old miscitation, #61 C.)
     // It does append one line naming itself, because `--version`/`--help` reach `cp` untouched
     // and would otherwise leave no trace of the wrapper at all (#15).
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
