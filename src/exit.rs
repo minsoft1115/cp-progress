@@ -5,12 +5,14 @@
 //! exit — cprog restores the default disposition and re-raises the signal (docs/process-model.md
 //! D2).
 //!
-//! The `128 + signal` fallback is narrower than it reads. For the standard signals the re-raise
-//! goes through [`signal_hook::low_level::emulate_default_handler`], which ends in `abort()` if
-//! its own raise ever returns — so a failure there dies of SIGABRT instead of reaching the
-//! fallback. What does reach it is the realtime range: the emulation does not know those signals,
-//! cprog raises them directly, and a raise can return if the signal is blocked in an inherited
-//! mask (docs/exceptions.md A1/A1a).
+//! The `128 + signal` fallback is unreachable, and kept anyway. For the standard signals the
+//! re-raise goes through [`signal_hook::low_level::emulate_default_handler`], which ends in
+//! `abort()` if its own raise ever returns — so a failure there dies of SIGABRT instead of
+//! falling through. For the realtime range cprog raises directly, and that raise *can* return
+//! when the signal is blocked — but a signal blocked in cprog is blocked in `cp` too (the mask is
+//! inherited across `spawn`, measured), so `cp` cannot have died of it and the branch is never
+//! entered with a blocked signal in hand. It costs one line and covers a wait status no kernel
+//! produces (docs/exceptions.md A1/A1a, F15).
 
 use std::process::ExitStatus;
 
@@ -70,10 +72,15 @@ pub fn finalize(disp: ExitDisposition) -> i32 {
 ///   emulation unblocks first (measured: a blocked SIGTERM still terminates as SIGTERM).
 /// * **It does not know the realtime range**, which comes back `EINVAL`. Raising those directly
 ///   is right: cprog installs handlers only for SIGINT/TERM/HUP/QUIT/WINCH/TSTP, so a signal
-///   arriving here is guaranteed to have its default disposition. The signal *mask*, though, is
-///   whatever was inherited — cprog never unblocks anything itself. If the parent blocked that
-///   signal the raise leaves it pending and returns, and `finalize`'s `128 + s` is what the
-///   caller sees. That is the only path that reaches it.
+///   arriving here is guaranteed to have its default disposition. Without this branch a realtime
+///   death would exit *normally* with `128 + s` and A1 would be broken — which is what
+///   `tests/signals.rs::cp_killed_by_a_realtime_signal_still_exits_cprog_signaled` pins.
+///
+/// A blocked signal cannot arrive here at all. The raise would indeed return and leave it
+/// pending, but reaching this function means `WTERMSIG` named that signal, and `cp` inherits
+/// cprog's mask verbatim — a signal cprog blocks is blocked in `cp` and cannot kill it. The
+/// kernel-forced synchronous signals are the one class that kills through a block, and they are
+/// all standard, so they take the branch above (exceptions A1a).
 fn reraise(signal: i32) {
     if signal_hook::low_level::emulate_default_handler(signal).is_err() {
         let _ = signal_hook::low_level::raise(signal);
