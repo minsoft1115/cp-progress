@@ -81,18 +81,49 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use std::sync::mpsc;
+    use std::sync::{Arc, Barrier};
     use std::time::Duration;
 
     #[test]
     fn relays_partial_line_without_waiting_for_newline() {
-        // docs/testing.md B9: bytes with no terminating newline are forwarded at once, not
-        // held back waiting for a line boundary.
+        // docs/testing.md B9: bytes with no terminating newline are forwarded at once, not held
+        // back waiting for a line boundary.
+        //
+        // "At once" has to be observed *before* the reader reaches EOF. Draining the channel
+        // afterwards cannot tell an immediate relay from one that buffered the line and flushed
+        // it on the way out — a hold-until-newline implementation passes that check (#61). So the
+        // reader blocks after the partial line and the main thread reads the channel while it is
+        // still parked there.
         let (tx, rx) = mpsc::sync_channel(16);
-        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
-        relay_stdout(Cursor::new(b"'a' -> ".to_vec()), &slow, &tx, true);
-        drop(tx);
-        let relayed: Vec<u8> = rx.into_iter().flatten().collect();
-        assert_eq!(relayed, b"'a' -> ", "partial line relayed immediately");
+        let released = Arc::new(Barrier::new(2));
+
+        struct PartialThenPark(Option<&'static [u8]>, Arc<Barrier>);
+        impl Read for PartialThenPark {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                match self.0.take() {
+                    Some(chunk) => {
+                        buf[..chunk.len()].copy_from_slice(chunk);
+                        Ok(chunk.len())
+                    }
+                    // Parked mid-stream: cp has said something and has not finished saying it.
+                    None => {
+                        self.1.wait();
+                        Ok(0)
+                    }
+                }
+            }
+        }
+
+        let reader = PartialThenPark(Some(b"'a' -> "), Arc::clone(&released));
+        let relay = std::thread::spawn(move || {
+            let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+            relay_stdout(reader, &slow, &tx, true);
+        });
+
+        let first = rx.recv_timeout(Duration::from_secs(2)).expect("partial line relayed at once");
+        assert_eq!(first, b"'a' -> ", "and relayed verbatim");
+        released.wait(); // let the reader finish
+        relay.join().unwrap();
     }
 
     #[test]

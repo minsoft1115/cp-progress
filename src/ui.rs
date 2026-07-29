@@ -405,6 +405,11 @@ mod name_row_tests {
         name_row(path, cols, Style::plain())
     }
 
+    /// The glyph fallback, where the ellipsis is three columns instead of one.
+    fn ascii(path: &str, cols: usize) -> String {
+        name_row(path, cols, Style { color: false, unicode: false })
+    }
+
     #[test]
     fn a_path_that_fits_is_untouched() {
         assert_eq!(plain("/mnt/a.iso", 40), "/mnt/a.iso");
@@ -433,10 +438,26 @@ mod name_row_tests {
 
     #[test]
     fn a_wide_character_is_never_split_in_half() {
-        // Dropping half a character would emit an invalid sequence, not a narrower row.
-        let got = name_row("/사진/한라산.jpg", 10, Style::plain());
-        assert!(got.width() <= 10);
-        assert!(got.chars().all(|c| c != '\u{fffd}'), "no replacement chars: {got:?}");
+        // The old assertion — "no U+FFFD in the result" — could not fail: `name_row` decodes
+        // nothing, and a cut off a character boundary panics rather than substituting. What the
+        // rule actually says is that the tail kept is a *suffix of the input starting at a
+        // character boundary*, and that one more character would not have fit (#61).
+        let path = "/사진/한라산.jpg";
+        for cols in 1..=path.width() {
+            let got = name_row(path, cols, Style::plain());
+            assert!(got.width() <= cols, "fits in {cols}: {got:?}");
+            let tail = got.strip_prefix('…').unwrap_or(&got);
+            assert!(path.ends_with(tail), "kept a real suffix at {cols}: {tail:?}");
+            // Nothing was left on the table: taking the next character back would overflow.
+            if !tail.is_empty() && tail.len() < path.len() {
+                let next = path[..path.len() - tail.len()].chars().next_back().unwrap();
+                let ellipsis = if got.starts_with('…') { 1 } else { 0 };
+                assert!(
+                    ellipsis + next.to_string().width() + tail.width() > cols,
+                    "at {cols} another char would have fit: {got:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -462,10 +483,15 @@ mod name_row_tests {
     }
 
     #[test]
-    fn a_width_too_small_for_anything_yields_nothing() {
-        assert_eq!(plain("/mnt/a.iso", 0), "");
-        // Not even the ellipsis fits in a single column? It does — it is one column wide.
-        assert_eq!(plain("/mnt/a.iso", 1), "…");
+    fn a_width_below_the_ellipsis_yields_nothing() {
+        // The guard this names is `cols.checked_sub(ellipsis.width())` — "not even the marker
+        // fits". The Unicode ellipsis is one column, so no width reaches it: `cols 0` returns
+        // earlier and `cols 1` fits the marker exactly. The ASCII fallback is three columns
+        // wide, and that is where the guard lives (#61).
+        assert_eq!(plain("/mnt/a.iso", 0), "", "zero width is refused before the marker");
+        assert_eq!(plain("/mnt/a.iso", 1), "…", "one column is exactly the marker");
+        assert_eq!(ascii("/mnt/a.iso", 2), "", "`...` needs three, so two yields none");
+        assert_eq!(ascii("/mnt/a.iso", 3), "...", "three is exactly the marker");
     }
 
     #[test]
@@ -639,9 +665,13 @@ mod tests {
 
     #[test]
     fn footer_suppressed_when_terminal_too_short() {
-        assert_eq!(render_footer(TerminalSize::new(80, 2), &state(), Style::plain()), None);
-        assert_eq!(render_footer(TerminalSize::new(80, 1), &state(), Style::plain()), None);
+        // The rule is `rows >= MIN_LOG_ROWS + FOOTER_ROWS` (invariant 2, F3), so **3 is the case
+        // that pins it**: rows 1 and 2 are refused by any off-by-one spelling of the threshold,
+        // and only the 3/4 pair says where the line is (#61).
+        assert_eq!(render_footer(TerminalSize::new(80, 3), &state(), Style::plain()), None);
         assert!(render_footer(TerminalSize::new(80, 4), &state(), Style::plain()).is_some());
+        // Below that, still nothing — a terminal with no room for a log region at all.
+        assert_eq!(render_footer(TerminalSize::new(80, 1), &state(), Style::plain()), None);
     }
 
     // ---- width-based shedding order (measured on plain style) -------------------------
@@ -668,8 +698,10 @@ mod tests {
 
     #[test]
     fn shedding_respects_survival_priority_across_widths() {
-        // Survival priority (drop order reversed): percent > bar > size > rate > eta.
-        for cols in 12u16..=80 {
+        // Survival priority (drop order reversed): percent > bar > size > rate > eta. From the
+        // percent field's own width up — below that every attempt has been shed and only the
+        // last resort is left, which has no priority to respect (F5).
+        for cols in 8u16..=80 {
             let line = render_footer(TerminalSize::new(cols, 24), &state(), Style::plain()).unwrap();
             let (eta, rate, size, bar, pct) = fields(&line);
             assert!(pct, "percent always survives (cols {cols}): {line:?}");
@@ -723,12 +755,23 @@ mod tests {
     }
 
     #[test]
-    fn footer_never_exceeds_terminal_width() {
+    fn the_footer_fits_the_terminal_down_to_the_last_resort() {
         // Plain style has no colour escapes, so display width == byte layout width.
-        for cols in 12u16..=200 {
+        //
+        // The lower bound is 8, not an unexplained 12: the percent field is eight columns and is
+        // never shed, so **8 is where the invariant stops holding**. Below it `render_footer`
+        // deliberately overflows rather than print nothing (F5), and a name promising "never
+        // exceeds" over all widths would be claiming the opposite of the documented behaviour (#61).
+        let percent_width = format_percent(Some(62.34)).width();
+        assert_eq!(percent_width, 8, "the field the last resort prints");
+        for cols in (percent_width as u16)..=200 {
             let line = render_footer(TerminalSize::new(cols, 24), &state(), Style::plain()).unwrap();
             assert!(line.width() <= cols as usize, "cols {cols}: {line:?}");
         }
+        // And the other side of the boundary, which nothing stated: one column short, the last
+        // resort prints the percent anyway and overflows — F5's accepted cost.
+        let narrow = render_footer(TerminalSize::new(7, 24), &state(), Style::plain()).unwrap();
+        assert!(narrow.width() > 7, "F5: the last resort overflows rather than print nothing");
     }
 
     #[test]
@@ -773,8 +816,10 @@ mod tests {
     #[test]
     fn colored_footer_visible_width_fits_terminal() {
         // Layout is computed on plain text; colour escapes must not push the *visible* width
-        // past the terminal.
-        for cols in 12u16..=80 {
+        // past the terminal. Same lower bound and same reason as
+        // `the_footer_fits_the_terminal_down_to_the_last_resort`: below the percent field's eight
+        // columns the overflow is F5's, not the colour's.
+        for cols in 8u16..=80 {
             let line = render_footer(TerminalSize::new(cols, 24), &state(), COLOR).unwrap();
             let visible = strip_sgr(&line);
             assert!(visible.width() <= cols as usize, "cols {cols}: {visible:?} from {line:?}");

@@ -63,8 +63,13 @@ fn preserves_nonzero_exit_on_cp_failure() {
     let theirs = cp([missing.as_os_str(), dst.as_os_str()]);
     assert_ne!(mine.status.code(), Some(0));
     assert_eq!(mine.status.code(), theirs.status.code(), "same exit code as cp");
-    // docs/testing.md E1: passthrough leaves the environment untouched, so cp's error text (locale included)
-    // is byte-identical to running cp directly. A leaked LC_ALL=C would diverge here.
+    // exceptions C2: a failing cp keeps its exit code, and its stderr reaches the user unchanged.
+    //
+    // Not what this shows: environment purity. `cp: cannot stat …: No such file or directory` is
+    // byte-identical under `C` and `en_US.UTF-8`, so injecting `LC_ALL=C` into the exec path
+    // leaves this test green (measured). The detector for a leak is
+    // `informational_output_stays_byte_identical_when_not_a_terminal`, whose `--version` output
+    // carries a non-ASCII author name — the old comment credited this test with it (#61).
     assert_eq!(mine.stderr, theirs.stderr, "cp's error output is byte-identical");
 }
 

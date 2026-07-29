@@ -181,9 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn long_suffix_attached_value_looking_like_flag() {
-        let i = inspect(&args(&["--suffix=-i", "a", "b"])).unwrap();
-        assert!(!i.interactive);
+    fn long_suffix_value_looking_like_flag() {
+        // The attached spelling is handled by the generic attached-value swallow (#30/B13a), so
+        // it passes even with the `--suffix` arm deleted. The *separated* spelling is the one
+        // that needs the arm — otherwise `-i` is read as a flag (#61).
+        let attached = inspect(&args(&["--suffix=-i", "a", "b"])).unwrap();
+        assert!(!attached.interactive);
+        let separated = inspect(&args(&["--suffix", "-i", "a", "b"])).unwrap();
+        assert!(!separated.interactive, "`-i` is the suffix, not interactive");
     }
 
     #[test]
@@ -194,16 +199,26 @@ mod tests {
     }
 
     #[test]
-    fn long_target_directory_attached_value_looking_like_flag() {
-        let i = inspect(&args(&["--target-directory=-v", "src"])).unwrap();
-        assert!(!i.verbose);
+    fn long_target_directory_value_looking_like_flag() {
+        let attached = inspect(&args(&["--target-directory=-v", "src"])).unwrap();
+        assert!(!attached.verbose);
+        let separated = inspect(&args(&["--target-directory", "-v", "src"])).unwrap();
+        assert!(!separated.verbose, "`-v` is the directory name, not verbose");
     }
 
     #[test]
     fn attached_short_suffix_value() {
-        // `-Sbak` -> suffix "bak"; no flags.
+        // `-Sbak` -> suffix "bak"; no flags. A value with no flag letter in it proves nothing on
+        // its own: with `-S` removed from the value-consuming arm entirely, `-Sbak` degrades to
+        // the shorts `-b -a -k`, none of which cprog looks at, and the assertion still holds.
+        // The flag-shaped value is what pins the consumption (#61).
         let i = inspect(&args(&["-Sbak", "a", "b"])).unwrap();
         assert!(!i.interactive && !i.verbose);
+
+        let flagish = inspect(&args(&["-S-i", "a", "b"])).unwrap();
+        assert!(!flagish.interactive, "`-i` here is `-S`'s value, not a flag");
+        let bundled = inspect(&args(&["-S-v", "a", "b"])).unwrap();
+        assert!(!bundled.verbose, "nor is `-v`");
     }
 
     // ---- `--` end of options ---------------------------------------------------------
@@ -247,6 +262,15 @@ mod tests {
         assert!(inspect(&args(&["--preserve=all", "-v", "a", "b"])).unwrap().verbose);
         assert!(inspect(&args(&["--sparse=always", "-i", "a", "b"])).unwrap().interactive);
         assert!(inspect(&args(&["--reflink=auto", "--help"])).unwrap().informational);
+
+        // Every case above carries an attached value, so `optional_value()` and `value()` behave
+        // alike and the "must not swallow" half was unobservable. A long option with *no* value
+        // is where they part: `value()` would take the `-v` after it (#61).
+        assert!(
+            inspect(&args(&["--parents", "-v", "a", "b"])).unwrap().verbose,
+            "a valueless long option must not consume the flag behind it"
+        );
+        assert!(inspect(&args(&["--no-clobber", "-i", "a", "b"])).unwrap().interactive);
     }
 
     // ---- non-UTF-8 arguments (G8) ----------------------------------------------------
