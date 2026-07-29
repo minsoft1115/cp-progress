@@ -378,6 +378,10 @@ mod tests {
         let c = s.tick(t0 + Duration::from_secs(1)).sample().unwrap();
         assert_eq!(c.done, 700, "continues from the same model");
         assert_eq!(c.total, Some(1000), "total not reset");
+        // `done` and `total` alone cannot tell a kept model from a rebuilt one — both are re-read
+        // from the same two paths on the next tick. The rate can: it needs the sample from
+        // *before* the failure, so only a model that survived the skip can state one (#59).
+        assert_eq!(c.rate, Some(200.0), "the pre-failure sample is still in the window");
     }
 
     // ---- #6: several write candidates (an inherited shell fd alongside the real dest) --------

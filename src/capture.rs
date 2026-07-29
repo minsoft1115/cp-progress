@@ -163,9 +163,12 @@ mod tests {
     fn dropping_the_receiver_releases_a_blocked_relay() {
         // Teardown relies on this: after the render loop the receiver is dropped, and a reader
         // parked in `send` on the bounded queue must fail and return so its join is bounded.
+        // The reader is endless on purpose. With a finite payload the loop also ends at EOF, so
+        // the test would pass with the send-failure `break` deleted — it would only be showing
+        // that `SyncSender` unblocks when the receiver goes away, which is std's behaviour, not
+        // cprog's rule (#59).
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
-        let payload = vec![b'x'; 8192 * 8];
-        let relay = std::thread::spawn(move || relay_bytes(Cursor::new(payload), &tx));
+        let relay = std::thread::spawn(move || relay_bytes(std::io::repeat(b'x'), &tx));
         std::thread::sleep(Duration::from_millis(30));
         assert!(!relay.is_finished(), "blocked on the full queue");
 
@@ -175,6 +178,33 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(relay.is_finished(), "dropping the receiver must end the relay");
+        relay.join().unwrap();
+    }
+
+    #[test]
+    fn dropping_the_receiver_releases_a_blocked_stdout_relay() {
+        // The same rule for the other reader. `relay_stdout` is the one that runs with `relay`
+        // true whenever the user passed `-v`, and its send-failure `break` was pinned by nothing:
+        // deleting it left the whole suite green, because every other test in this file feeds it
+        // a finite reader that ends at EOF regardless (#59).
+        //
+        // Under that deletion this test does not fail, it *hangs* — the loop reads an endless
+        // reader forever with nowhere to put the bytes. That is how a non-terminating rule shows
+        // up, and how `cargo-mutants` scores it (a timeout is a detection).
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
+        let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
+        let relay = std::thread::spawn(move || {
+            relay_stdout(std::io::repeat(b'x'), &slow, &tx, true);
+        });
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!relay.is_finished(), "blocked on the full queue");
+
+        drop(rx);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !relay.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(relay.is_finished(), "dropping the receiver must end the stdout relay too");
         relay.join().unwrap();
     }
 
