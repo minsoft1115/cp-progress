@@ -10,15 +10,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
 use nix::pty::{openpty, Winsize};
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::{read_retry, rfind, TmpDir};
+use common::{read_retry, rfind, TmpDir, Watchdog};
 
 #[test]
 fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
@@ -51,6 +48,10 @@ fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
     let pgid = Pid::from_raw(child.id() as i32);
 
     let bar: [u8; 3] = [0xE2, 0x96, 0x88]; // █
+    // Without this the only exit from the read loop below is EOF on the master, so a
+    // teardown wedge hangs `cargo test` instead of failing it (#61 D).
+    let dog = Watchdog::arm(child.id() as i32, 20);
+
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -69,6 +70,8 @@ fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog hung: the watchdog had to kill it");
 
     assert!(signaled, "footer never appeared, so the signal path was not exercised");
     // True signaled exit (not a plain 128+n code).
@@ -120,22 +123,8 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
     drop(pty.slave);
     let cprog_pid = Pid::from_raw(child.id() as i32);
 
-    // Watchdog: if cprog deadlocks in join (the bug), force-kill after a grace period and flag it.
-    let hung = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    let watchdog = {
-        let (hung, done) = (Arc::clone(&hung), Arc::clone(&done));
-        std::thread::spawn(move || {
-            for _ in 0..80 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if done.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
-            hung.store(true, Ordering::Relaxed);
-            let _ = kill(cprog_pid, Signal::SIGKILL);
-        })
-    };
+    // A hang here is a teardown deadlock, which is the bug this test exists for.
+    let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
     // Open the write end so cp's open(FIFO) unblocks; send no data so cp blocks on read.
     let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
@@ -160,11 +149,10 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
         }
     }
     let status = child.wait().unwrap();
-    done.store(true, Ordering::Relaxed);
-    let _ = watchdog.join();
+    dog.disarm();
 
     assert!(sent, "cp never started, so the teardown path was not exercised");
-    assert!(!hung.load(Ordering::Relaxed), "cprog hung after SIGTERM (reader join deadlock)");
+    assert!(!dog.hung(), "cprog hung after SIGTERM (reader join deadlock)");
     // cprog forwards the termination to cp and re-raises, exiting signaled.
     assert!(status.signal().is_some(), "cprog should exit signaled, got {status:?}");
 }
@@ -203,22 +191,8 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
     drop(pty.slave);
     let cprog_pid = Pid::from_raw(child.id() as i32);
 
-    // Watchdog: never let a teardown deadlock hang the suite.
-    let hung = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    let watchdog = {
-        let (hung, done) = (Arc::clone(&hung), Arc::clone(&done));
-        std::thread::spawn(move || {
-            for _ in 0..80 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if done.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
-            hung.store(true, Ordering::Relaxed);
-            let _ = kill(cprog_pid, Signal::SIGKILL);
-        })
-    };
+    // A hang here is a teardown deadlock, which is the bug this test exists for.
+    let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
     let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
 
@@ -241,11 +215,10 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
         }
     }
     let status = child.wait().unwrap();
-    done.store(true, Ordering::Relaxed);
-    let _ = watchdog.join();
+    dog.disarm();
 
     assert!(sent, "cp never started, so the teardown path was not exercised");
-    assert!(!hung.load(Ordering::Relaxed), "cprog hung after SIGINT (reader join deadlock)");
+    assert!(!dog.hung(), "cprog hung after SIGINT (reader join deadlock)");
     // The re-raised signal must be the *same* one cprog received (SIGINT), not a normalized SIGTERM.
     assert_eq!(
         status.signal(),
@@ -308,6 +281,10 @@ fn cp_killed_by_a_realtime_signal_still_exits_cprog_signaled() {
     let rtmin = libc::SIGRTMIN();
 
     let bar: [u8; 3] = [0xE2, 0x96, 0x88]; // █
+    // Without this the only exit from the read loop below is EOF on the master, so a
+    // teardown wedge hangs `cargo test` instead of failing it (#61 D).
+    let dog = Watchdog::arm(child.id() as i32, 20);
+
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -330,6 +307,8 @@ fn cp_killed_by_a_realtime_signal_still_exits_cprog_signaled() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog hung: the watchdog had to kill it");
 
     assert!(killed, "never found cp to signal, so the path was not exercised");
     assert_eq!(
@@ -442,6 +421,10 @@ fn a_signal_cprog_does_not_register_keeps_its_default_action() {
     let cprog_pid = Pid::from_raw(child.id() as i32);
 
     let bar: [u8; 3] = [0xE2, 0x96, 0x88]; // █
+    // Without this the only exit from the read loop below is EOF on the master, so a
+    // teardown wedge hangs `cargo test` instead of failing it (#61 D).
+    let dog = Watchdog::arm(child.id() as i32, 20);
+
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -461,6 +444,8 @@ fn a_signal_cprog_does_not_register_keeps_its_default_action() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog hung: the watchdog had to kill it");
 
     assert!(signaled, "footer never appeared, so nothing was exercised");
     assert_eq!(
@@ -521,21 +506,8 @@ fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
     drop(pty.slave);
     let cprog_pid = Pid::from_raw(child.id() as i32);
 
-    let hung = Arc::new(AtomicBool::new(false));
-    let done = Arc::new(AtomicBool::new(false));
-    let watchdog = {
-        let (hung, done) = (Arc::clone(&hung), Arc::clone(&done));
-        std::thread::spawn(move || {
-            for _ in 0..80 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                if done.load(Ordering::Relaxed) {
-                    return;
-                }
-            }
-            hung.store(true, Ordering::Relaxed);
-            let _ = kill(cprog_pid, Signal::SIGKILL);
-        })
-    };
+    // A hang here means the stopped cp was never continued — the bug this test exists for.
+    let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
     let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
 
@@ -567,8 +539,7 @@ fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
         }
     }
     let status = child.wait().unwrap();
-    done.store(true, Ordering::Relaxed);
-    let _ = watchdog.join();
+    dog.disarm();
 
     let cp = stopped_cp.expect("cp never started, so the scenario was not exercised");
     // Only if that pid is still cp: on the failure path cp is left stopped and PDEATHSIG cannot
@@ -578,7 +549,7 @@ fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
         let _ = kill(cp, Signal::SIGKILL);
     }
     assert!(
-        !hung.load(Ordering::Relaxed),
+        !dog.hung(),
         "cprog hung: a stopped cp was never continued, so its pipes never closed"
     );
     assert!(status.signal().is_some(), "cprog should still exit signaled, got {status:?}");

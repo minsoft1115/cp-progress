@@ -767,8 +767,16 @@ mod tests {
         // and saying so is better than a comparison that quietly passes either way.
         let on_disk = blocks.saturating_mul(512);
         if on_disk >= LEN {
-            eprintln!("note: {path:?} has no hole support ({on_disk} bytes allocated); the \
-                       block-vs-length half of this test did not apply");
+            // Direct write: libtest captures `eprintln!` and drops it for a passing test, which
+            // would make this notice as silent as saying nothing (#61 D).
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                format!(
+                    "note: {path:?} has no hole support ({on_disk} bytes allocated); the \
+                     block-vs-length half of this test did not apply\n"
+                )
+                .as_bytes(),
+            );
         } else {
             assert!(
                 on_disk < LEN / 2,
