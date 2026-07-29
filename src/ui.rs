@@ -831,12 +831,11 @@ mod tests {
     // ---- footer_for: the per-tick render decision ------------------------------------
 
     #[test]
-    fn footer_for_hidden_when_not_slow() {
-        assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain(), true), None);
-    }
-
-    #[test]
-    fn footer_for_hidden_when_slow_but_no_state_yet() {
+    fn footer_for_hidden_when_no_state_is_published() {
+        // `None` covers both "not slow" and "slow but nothing sampled yet": the sampler alone
+        // decides, and publishes `Some` only when there is something to draw (see `footer_for`'s
+        // doc). Those were two tests with byte-identical bodies, because at this API they are the
+        // same call (#61 B).
         assert_eq!(footer_for(None, TerminalSize::new(80, 24), Style::plain(), true), None);
     }
 

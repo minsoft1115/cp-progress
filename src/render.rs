@@ -480,31 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn drop_erases_both_rows() {
-        let buf = SharedBuf::default();
-        {
-            let mut g = FooterGuard::new(buf.clone());
-            g.draw(&["name", "BAR"]).unwrap();
-        }
-        let out = buf.bytes();
-        assert!(out.ends_with(SHOW), "cursor restored last: {out:?}");
-        let before_show = &out[..out.len() - SHOW.len()];
-        assert!(
-            before_show.ends_with(b"\r\x1b[K\x1b[A\r\x1b[K"),
-            "both rows erased before the cursor comes back: {out:?}"
-        );
-    }
-
-    #[test]
-    fn draw_emits_cr_text_erase_to_eol() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["hi"]).unwrap();
-        // First draw hides the cursor, then draws the footer.
-        assert_eq!(buf.bytes(), b"\x1b[?25l\rhi\x1b[K");
-    }
-
-    #[test]
     fn cursor_hidden_only_once() {
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());

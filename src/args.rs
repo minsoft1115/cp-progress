@@ -95,6 +95,7 @@ mod tests {
 
     #[test]
     fn plain_files_have_no_flags() {
+        // Including `informational`: two plain operands are a copy, not `--help` (#61 B).
         let i = inspect(&args(&["a.iso", "/mnt/a.iso"])).unwrap();
         assert!(!i.interactive);
         assert!(!i.verbose);
@@ -110,11 +111,6 @@ mod tests {
         assert!(inspect(&args(&["--version"])).unwrap().informational);
         // Present alongside other args (cp processes them first regardless).
         assert!(inspect(&args(&["-a", "--help", "src", "dst"])).unwrap().informational);
-    }
-
-    #[test]
-    fn normal_copy_is_not_informational() {
-        assert!(!inspect(&args(&["a", "b"])).unwrap().informational);
     }
 
     // ---- interactive detection (docs/testing.md E2, runtime-model) -----------------------------------
