@@ -154,7 +154,14 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
     // promise `stdbuf` exists to guarantee — but the choice is a choice, and it was not written
     // down until now.
     if rustix::process::geteuid().is_root() {
-        return; // root bypasses the permission bits, so there is nothing to observe
+        // A silent `return` reports `ok`, which reads as coverage — and this test is B8's only
+        // evidence for the "cannot tell" half, so a container run as root would quietly leave it
+        // unguarded. Say so instead (#61 D).
+        common::notice(
+            "SKIP unreadable_path_entry_reads_as_stdbuf_missing: running as root, which bypasses \
+             the permission bits this test needs",
+        );
+        return;
     }
 
     let tmp = TmpDir::new("unreadable");
@@ -185,7 +192,12 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
     std::fs::set_permissions(&bindir, std::fs::Permissions::from_mode(0o000)).unwrap();
     let _restore = Restore(bindir.clone());
     if bindir.join("stdbuf").metadata().is_ok() {
-        return; // some filesystems ignore the mode; the precondition does not hold here
+        // Same reasoning as the root skip above: visible, not silent.
+        common::notice(
+            "SKIP unreadable_path_entry_reads_as_stdbuf_missing: this filesystem ignores mode 000, \
+             so the directory stayed searchable",
+        );
+        return;
     }
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };

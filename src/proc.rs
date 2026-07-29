@@ -338,9 +338,21 @@ mod tests {
         // Skip where fdinfo access is restricted (e.g. hidepid mounts): access mode is then
         // unavailable and every fd degrades to `Other` by design.
         if std::fs::read_to_string(format!("/proc/{pid}/fdinfo/1")).is_err() {
+            // Not `eprintln!`: libtest captures that and drops it for a passing test, so the
+            // skip would be as silent as the bare `return` it replaced (#61 D).
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"SKIP linux_proc_source_classifies_our_open_files: fdinfo unreadable\n",
+            );
             return;
         }
-        let dir = std::env::temp_dir().join(format!("cprog_proc_{pid}"));
+        // The pid alone is not unique enough: a stale directory from another user's run with the
+        // same pid makes the `fs::write` below panic with EACCES — an environmental failure in a
+        // test that otherwise skips carefully (#61 D). A counter keeps runs inside one process
+        // apart too.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("cprog_proc_{pid}_{seq}"));
         std::fs::create_dir_all(&dir).unwrap();
         let wpath = dir.join("wfile");
         let rpath = dir.join("rfile");
@@ -351,7 +363,22 @@ mod tests {
         // Skip where the sandbox forbids stat-through-the-magic-`/proc`-symlink — the exact call
         // `classify_fd` makes. Probing our own known regular fd separates an environment
         // restriction (skip) from a real classification regression (which fails the asserts).
+        //
+        // The directory is removed on the way out of *every* path, this one included: an early
+        // return used to leave it behind, and a leftover is what makes the next run's `create_dir`
+        // land on someone else's directory (#61 D).
+        struct Rm(std::path::PathBuf);
+        impl Drop for Rm {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Rm(dir.clone());
         if std::fs::metadata(format!("/proc/{pid}/fd/{}", w.as_raw_fd())).is_err() {
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr(),
+                b"SKIP linux_proc_source_classifies_our_open_files: /proc fd stat refused\n",
+            );
             return;
         }
 
@@ -364,6 +391,6 @@ mod tests {
             fds.iter().any(|e| e.kind == FdKind::RegularRead && e.path.ends_with("rfile")),
             "expected a RegularRead for rfile in {fds:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        // cleanup is the `Rm` guard above
     }
 }

@@ -109,6 +109,14 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
 
     // Child A owns the terminal and drives the job-control dance (foreground -> Ctrl-Z -> bg ->
     // resume), so the parent only needs to drain and assert.
+
+    // One rendezvous crosses between parent and child: the child cannot see the master, so it
+    // used to *wait 800 ms and hope* the footer had appeared. On a loaded runner that is not
+    // always true, and the run then proved nothing — which is how this failed in CI (#61 D). The
+    // parent watches for the footer and pokes this pipe; the child blocks on it.
+    let mut rendezvous = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(rendezvous.as_mut_ptr()) }, 0, "pipe()");
+    let (ready_r, ready_w) = (rendezvous[0], rendezvous[1]);
     let a = unsafe { libc::fork() };
     assert!(a >= 0, "fork failed");
     if a == 0 {
@@ -129,12 +137,15 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
                 libc::execvpe(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
+            libc::close(ready_w);
             libc::tcsetpgrp(0, b); // cprog foreground -> managed
             let nap = |s: i64| {
                 let ts = libc::timespec { tv_sec: 0, tv_nsec: s * 1_000_000 };
                 libc::nanosleep(&ts, std::ptr::null_mut());
             };
-            nap(800); // footer up
+            // Wait for the parent to say the footer is actually up, not for a clock.
+            let mut ack = [0u8; 1];
+            libc::read(ready_r, ack.as_mut_ptr() as *mut libc::c_void, 1);
             libc::kill(b, libc::SIGTSTP);
             let mut st = 0;
             libc::waitpid(b, &mut st, libc::WUNTRACED);
@@ -146,12 +157,27 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
         }
     }
 
-    unsafe { libc::close(slave_fd) };
+    unsafe {
+        libc::close(slave_fd);
+        libc::close(ready_r);
+    }
     let _feeder = Feeder::start(fifo.clone());
     let mut master = unsafe { File::from_raw_fd(master_fd) };
     let mut out = Vec::new();
+    // Phase 1: wait for the footer to actually engage, then release the child. The cursor-hide is
+    // cprog's first footer byte, so it is the earliest honest signal that the scenario can start.
+    drain(&mut master, master_fd, &mut out, Instant::now() + Duration::from_millis(5000), Some((0, b"\x1b[?25l")));
+    assert!(
+        contains(&out, b"\x1b[?25l"),
+        "footer never engaged within 5 s, so the job-control sequence was never started"
+    );
+    unsafe { libc::write(ready_w, b"1".as_ptr() as *const libc::c_void, 1) };
+    // Phase 2: the child now runs its sequence; drain the rest.
     drain(&mut master, master_fd, &mut out, Instant::now() + Duration::from_millis(3000), None);
-    unsafe { libc::kill(-a, libc::SIGKILL) };
+    unsafe {
+        libc::close(ready_w);
+        libc::kill(-a, libc::SIGKILL);
+    }
     let mut s = 0;
     unsafe { libc::waitpid(a, &mut s, 0) };
 
@@ -187,6 +213,14 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
+    // One rendezvous crosses between parent and child: the child cannot see the master, so it
+    // used to *wait 800 ms and hope* the footer had appeared. On a loaded runner that is not
+    // always true, and the run then proved nothing — which is how this failed in CI (#61 D). The
+    // parent watches for the footer and pokes this pipe; the child blocks on it.
+    let mut rendezvous = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(rendezvous.as_mut_ptr()) }, 0, "pipe()");
+    let (ready_r, ready_w) = (rendezvous[0], rendezvous[1]);
+
     let a = unsafe { libc::fork() };
     assert!(a >= 0, "fork failed");
     if a == 0 {
@@ -205,13 +239,16 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
                 libc::execvpe(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
+            libc::close(ready_w);
             libc::tcsetpgrp(0, b); // cprog foreground -> managed
             let nap = |ms: i64| {
                 let ts = libc::timespec { tv_sec: 0, tv_nsec: ms * 1_000_000 };
                 libc::nanosleep(&ts, std::ptr::null_mut());
             };
             let mut st = 0;
-            nap(800); // footer up
+            // Wait for the parent to say the footer is actually up, not for a clock.
+            let mut ack = [0u8; 1];
+            libc::read(ready_r, ack.as_mut_ptr() as *mut libc::c_void, 1);
             libc::kill(b, libc::SIGTSTP);
             libc::waitpid(b, &mut st, libc::WUNTRACED);
             libc::tcsetpgrp(0, apg); // `bg`: cprog resumes suppressed
@@ -233,12 +270,27 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
         }
     }
 
-    unsafe { libc::close(slave_fd) };
+    unsafe {
+        libc::close(slave_fd);
+        libc::close(ready_r);
+    }
     let _feeder = Feeder::start(fifo.clone());
     let mut master = unsafe { File::from_raw_fd(master_fd) };
     let mut out = Vec::new();
+    // Phase 1: wait for the footer to actually engage, then release the child. The cursor-hide is
+    // cprog's first footer byte, so it is the earliest honest signal that the scenario can start.
+    drain(&mut master, master_fd, &mut out, Instant::now() + Duration::from_millis(5000), Some((0, b"\x1b[?25l")));
+    assert!(
+        contains(&out, b"\x1b[?25l"),
+        "footer never engaged within 5 s, so the job-control sequence was never started"
+    );
+    unsafe { libc::write(ready_w, b"1".as_ptr() as *const libc::c_void, 1) };
+    // Phase 2: the child now runs its sequence; drain the rest.
     drain(&mut master, master_fd, &mut out, Instant::now() + Duration::from_millis(4500), None);
-    unsafe { libc::kill(-a, libc::SIGKILL) };
+    unsafe {
+        libc::close(ready_w);
+        libc::kill(-a, libc::SIGKILL);
+    }
     let mut s = 0;
     unsafe { libc::waitpid(a, &mut s, 0) };
 

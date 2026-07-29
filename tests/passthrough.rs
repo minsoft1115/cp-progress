@@ -146,7 +146,30 @@ fn passthrough_execs_cp_replacing_the_process() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     // Unblock cp: open the write end and close it at once -> EOF -> empty copy, exit 0.
-    drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+    //
+    // Non-blocking, because a blocking write-open on a FIFO waits for a reader **forever**. If
+    // the exec path regresses and no cp ever opens the read end, this line used to wedge the
+    // whole `cargo test` run instead of failing it — a hang is the one failure mode a suite
+    // cannot report (#61 D). `ENXIO` is exactly "no reader", so it becomes the assertion.
+    let writer = {
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+            if fd >= 0 {
+                break Some(fd);
+            }
+            if std::time::Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    assert!(
+        writer.is_some(),
+        "no reader ever opened the FIFO, so cp was never exec'd (comm was {comm:?})"
+    );
+    unsafe { libc::close(writer.unwrap()) };
     let status = child.wait().unwrap();
 
     assert_eq!(comm.trim_end(), "cp", "the spawned pid must have been replaced by cp");

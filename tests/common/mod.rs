@@ -114,6 +114,72 @@ pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant,
     }
 }
 
+/// Print a notice that survives libtest's output capture.
+///
+/// `eprintln!` is captured and thrown away for a passing test, so a skip announced that way is
+/// invisible — exactly the silence it was meant to break. A direct write to the real stderr is
+/// not intercepted (#61 D).
+pub fn notice(msg: &str) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(format!("{msg}\n").as_bytes());
+}
+
+/// Kills `pid` if the test has not disarmed within `secs`, and remembers that it had to.
+///
+/// cprog wraps signals, job control and PTYs, so a regression here does not usually produce a
+/// wrong byte — it produces **no bytes at all**, and a test whose only exit is EOF on the master
+/// then blocks forever. A hang is the one failure a suite cannot report: CI shows a timeout with
+/// no test named. This turns that into a normal red assertion (#61 D).
+///
+/// **Disarm immediately after `wait()`.** The kill lands on a pid the test has not reaped yet in
+/// every ordinary path, so it can only hit its own child — the one exception is the window
+/// between the test reaping the child and calling `disarm()`, where the pid could in principle be
+/// reused. That window is microseconds and closing it entirely would need the watchdog to
+/// re-identify the process; keeping `disarm()` on the line after `wait()` is the cheaper rule.
+/// `Drop` disarms as a backstop and joins.
+pub struct Watchdog {
+    hung: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    pub fn arm(pid: i32, secs: u64) -> Self {
+        let hung = Arc::new(AtomicBool::new(false));
+        let done = Arc::new(AtomicBool::new(false));
+        let (h, d) = (Arc::clone(&hung), Arc::clone(&done));
+        let handle = std::thread::spawn(move || {
+            for _ in 0..(secs * 10) {
+                std::thread::sleep(Duration::from_millis(100));
+                if d.load(Ordering::Relaxed) {
+                    return;
+                }
+            }
+            h.store(true, Ordering::Relaxed);
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        });
+        Watchdog { hung, done, handle: Some(handle) }
+    }
+
+    /// Whether the watchdog had to kill the child — i.e. the test would have hung.
+    pub fn hung(&self) -> bool {
+        self.hung.load(Ordering::Relaxed)
+    }
+
+    pub fn disarm(&self) {
+        self.done.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.disarm();
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// A throttled writer feeding a FIFO to keep a `cp` copy slow. Stops and joins on drop.
 ///
 /// A FIFO that cannot be opened turns the thread into a no-op, which turns "a slow copy" into an
