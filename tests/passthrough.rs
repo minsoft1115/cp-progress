@@ -76,7 +76,13 @@ fn preserves_nonzero_exit_on_cp_failure() {
 #[test]
 fn passthrough_output_is_byte_identical_to_cp() {
     // docs/testing.md E1/E3: not a TTY here -> passthrough. With a user-supplied -v, cprog's
-    // (inherited) stdout/stderr must match cp's exactly — same env, same quoting, same code.
+    // (inherited) stdout/stderr must match cp's exactly — same quoting, same code.
+    //
+    // Not claimed: environment purity. Injecting `LC_ALL=C` into the exec'd env leaves this test
+    // green, because a `-v` line for an ASCII path is byte-identical under `C` and the ambient
+    // locale (measured). The detector is
+    // `informational_output_stays_byte_identical_when_not_a_terminal`, whose `--version` output
+    // carries non-ASCII text — the same correction the sibling above already carries (#61, #69 D).
     let tmp = TmpDir::new("identical");
     let src = tmp.path("s.bin");
     std::fs::write(&src, b"hello cprog").unwrap();

@@ -212,11 +212,14 @@ mod tests {
 
     #[test]
     fn rate_is_per_second_not_per_window() {
-        // The rate is a *quotient*: bytes divided by the span they took. Every rate test that
-        // asserts a non-zero figure happens to use a one-second span, where dividing and
-        // multiplying by the span give the same number; the one test with a longer span
-        // (`without_reset_a_long_stop_drags_the_rate_to_zero`) has a zero delta, where they agree
-        // too. So nothing here actually said which operation this is.
+        // The rate is a *quotient*: bytes divided by the span they took. A one-second span cannot
+        // show that — dividing and multiplying by it give the same number — and when this test was
+        // written every other non-zero rate assertion used exactly that span, so nothing said which
+        // operation it is. That is no longer the only witness:
+        // `without_reset_a_long_stop_drags_the_rate_to_zero` gained a resume (#61), which put a
+        // 300-byte delta across a 60.1 s span, so turning `delta / span` into `delta * span` now
+        // fails both tests rather than this one alone (measured, #69 D). Two spans is not redundancy here — this one is the arithmetic
+        // stated directly, that one is the same rule reached through a job-control stop.
         let mut m = ProgressModel::new(Some(10_000), Duration::from_secs(4));
         let t0 = Instant::now();
         m.push(t0, 0);
@@ -368,7 +371,9 @@ mod tests {
         assert!(approx(m.rate().unwrap(), 0.0), "no progress across the stop");
 
         // Now copying again, briskly: 300 bytes in the 100 ms since resuming = 3000 B/s. With the
-        // stop still in the window the average is a hundredth of that, and the user sees a rate
+        // stop still in the window the average is 300 bytes over the whole 60.1 s span = 4.99 B/s,
+        // a *six-hundredth* of it — the assertion below caps the figure at 10 B/s, which a
+        // hundredth (30 B/s) would not even satisfy (#69 D). The user sees a rate
         // and an eta that describe a minute of standing still rather than the copy in front of
         // them. `reset_samples` is what removes it.
         let resumed = t0 + Duration::from_millis(60_100);

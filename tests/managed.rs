@@ -323,7 +323,7 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
     // Deliberately *not* claimed: that any of this is managed-mode behaviour. cp fails instantly,
     // so no footer, no log-area relay and no `✗` ever occur, and every assertion below holds
     // under `CPROG_PASSTHROUGH=1` too (measured). The header used to promise "a ✗ summary" while
-    // the last assertion denies it; C2's relay-and-erase半 is pinned by the units and by
+    // the last assertion denies it; C2's relay-and-erase half is pinned by the units and by
     // `managed_verbose_lines_interleave_with_footer_during_copy` (#61).
     let tmp = TmpDir::new("cperr");
     let src = tmp.0.join("src.bin");

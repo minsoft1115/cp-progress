@@ -380,8 +380,10 @@ mod tests {
         // its two rows scrolls the screen — and the next erase still walks up exactly one row.
         // Get that wrong and every following write lands a line off, silently eating log output.
         //
-        // Six rows is the smallest terminal that gets a footer at all (MIN_LOG_ROWS 2 +
-        // FOOTER_ROWS 2) with room to actually reach the bottom.
+        // Four rows is the smallest terminal that gets a footer at all — `render_footer` returns
+        // `None` below `MIN_LOG_ROWS + FOOTER_ROWS`, which is 2 + 2. Six is used here because the
+        // subject is the *bottom edge*: the footer has to be pushed down to the last line by log
+        // output above it, and at four rows there is no room to do the pushing (#69 D).
         let screen = SharedScreen::new(6);
         let footer = ["NAME", "BAR"];
         {
