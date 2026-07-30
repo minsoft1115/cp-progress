@@ -21,6 +21,9 @@
 # release procedure's `--locked --dry-run` step fail until it is passed --allow-dirty.
 /CLAUDE.md
 
+# Local AI-assistant review notes. Same reason as /CLAUDE.md above.
+/ai-review/
+
 # Editor / OS junk
 .vscode/
 .idea/

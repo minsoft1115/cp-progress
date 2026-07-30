@@ -346,10 +346,15 @@ mod tests {
             );
             return;
         }
-        // The pid alone is not unique enough: a stale directory from another user's run with the
-        // same pid makes the `fs::write` below panic with EACCES — an environmental failure in a
-        // test that otherwise skips carefully (#61 D). A counter keeps runs inside one process
-        // apart too.
+        // A stale directory from another user's run with the same pid makes the `fs::write` below
+        // panic with EACCES — an environmental failure in a test that otherwise skips carefully
+        // (#61 D). What prevents that is the `Rm` drop guard further down, which removes the
+        // directory on *every* exit path so there is no leftover for the next run to land on.
+        //
+        // The counter is not what does it: this is the only caller and it runs once per process,
+        // so `seq` is always 0 and the path is always `cprog_proc_<pid>_0` — exactly as collision
+        // prone as the pid alone. It is kept as a cheap guard in case a second caller appears, not
+        // as the mitigation the previous comment credited it with (#69 D).
         static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("cprog_proc_{pid}_{seq}"));

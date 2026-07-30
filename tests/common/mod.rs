@@ -3,13 +3,82 @@
 //! Not every test crate uses every helper, so unused-warnings are allowed here.
 #![allow(dead_code)]
 
+use nix::fcntl::{FcntlArg, FdFlag, OFlag};
+use nix::pty::{OpenptyResult, Winsize};
+use nix::sys::stat::Mode;
+use nix::sys::termios::Termios;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::RawFd;
+use std::os::fd::{AsFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// How long a FIFO write-end open waits for `cp` to show up as the reader.
+///
+/// Generous enough that a loaded machine spawning `cp` is never mistaken for a broken one, and
+/// short enough that the test still reports before any CI job timeout.
+const FIFO_READER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `openpty` with `FD_CLOEXEC` on both ends.
+///
+/// **The flag is what keeps one test from failing another one.** These tests run in parallel in
+/// one process, and each spawns children. A PTY fd without `FD_CLOEXEC` survives the `exec` of
+/// *every sibling test's* child, so an unrelated `cp` ends up holding this test's slave open —
+/// and a master whose slave is still open never reports EOF. The test that owns the PTY then
+/// blocks until its own deadline and is reported as the failure, while the test that actually
+/// leaked nothing and broke nothing is the one that inherited the fd. The misattribution is not
+/// hypothetical: raising `SIZE_FALLBACK` to an hour made `sigwinch_relayouts_the_footer_to_the_new_width`
+/// pass alone in 0.10 s and fail in 10.05 s alongside its own suite — *both* resize tests red,
+/// each held open by the other's child (#69).
+///
+/// The `Stdio` handles the tests hand their children are `try_clone`s, and `dup2` onto fd 0/1/2
+/// clears `FD_CLOEXEC` on the copy — so deliberate stdio inheritance still works. Only the
+/// undeliberate kind stops.
+pub fn openpty_cloexec(winsize: Option<&Winsize>) -> OpenptyResult {
+    let pty = nix::pty::openpty(winsize, None::<&Termios>).expect("openpty");
+    for fd in [pty.master.as_fd(), pty.slave.as_fd()] {
+        nix::fcntl::fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).expect("set FD_CLOEXEC on pty fd");
+    }
+    pty
+}
+
+/// Open the write end of a FIFO, giving up if no reader ever arrives.
+///
+/// A blocking `open(2)` of a FIFO's write end does not return until some process opens the read
+/// end. In this suite that reader is always the `cp` that the cprog under test spawns — so a
+/// regression that stops cprog from reaching the spawn at all (a broken managed launch, a wrong
+/// mode decision) leaves this open blocking **forever**, and the test never reports.
+///
+/// [`Watchdog`] cannot rescue that. It kills the child, and the child was never what was holding
+/// the open — the kernel is, waiting for a reader that is not coming. Pointing `stdbuf` at a
+/// non-existent program showed the shape: 16 tests across five suites stopped reporting entirely
+/// and the run ended as a bare CI timeout with no test named (#69).
+///
+/// `O_NONBLOCK` turns "wait for a reader" into `ENXIO`, which this polls on until the deadline and
+/// then reports as `None` — a red assertion at the call site instead of silence. On success the
+/// flag is cleared again, so the caller's `write_all` throttles against a full pipe buffer exactly
+/// as it would have after a blocking open.
+pub fn open_fifo_writer(fifo: &std::path::Path) -> Option<File> {
+    let deadline = Instant::now() + FIFO_READER_TIMEOUT;
+    loop {
+        match nix::fcntl::open(fifo, OFlag::O_WRONLY | OFlag::O_NONBLOCK, Mode::empty()) {
+            Ok(fd) => {
+                // F_SETFL ignores the access-mode bits, so an empty set clears O_NONBLOCK without
+                // disturbing O_WRONLY. Blocking writes are what the throttled feeders assume: a
+                // non-blocking one would return EAGAIN on a full pipe and be read as "cp closed".
+                nix::fcntl::fcntl(fd.as_fd(), FcntlArg::F_SETFL(OFlag::empty())).ok()?;
+                return Some(File::from(fd));
+            }
+            // Precisely "no reader has opened this FIFO yet" for O_WRONLY | O_NONBLOCK.
+            Err(nix::errno::Errno::ENXIO) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+}
 
 /// Read one chunk from a PTY master, retrying on EINTR and treating EIO (the slave side fully
 /// closed) or any other error as end-of-stream. Returns 0 at EOF. This keeps the integration
@@ -131,6 +200,13 @@ pub fn notice(msg: &str) {
 /// then blocks forever. A hang is the one failure a suite cannot report: CI shows a timeout with
 /// no test named. This turns that into a normal red assertion (#61 D).
 ///
+/// **Every test whose only exit is EOF arms one.** That was not true until #69: turning the render
+/// loop's `Disconnected => break` into `continue` left 12 tests running forever (quiet 4,
+/// log_integrity 1, managed 6, fallback 1), and sleeping before `cmd.exec()` in the passthrough
+/// path left 3 more (forced_passthrough 2, background 1) — the last of which had a 30 s poll
+/// deadline that an unconditional `child.wait()` after it made moot. A bounded read loop is not
+/// enough on its own; the wait that follows it has to be bounded too.
+///
 /// **Disarm immediately after `wait()`.** The kill lands on a pid the test has not reaped yet in
 /// every ordinary path, so it can only hit its own child — the one exception is the window
 /// between the test reaping the child and calling `disarm()`, where the pid could in principle be
@@ -186,6 +262,11 @@ impl Drop for Watchdog {
 /// instant one with nothing said about it. That is deliberate — a failure here is not the test's
 /// subject — but it is another reason the tests that use it must first prove the copy was slow
 /// (a footer appeared, `copied > 0`) before concluding anything from what is missing (#60).
+///
+/// The open goes through [`open_fifo_writer`], which bounds the wait for a reader. Without that
+/// bound "no-op" was not the failure mode at all: the thread blocked in `open` forever, and
+/// `Drop`'s join then blocked the test that owned it — so a missing reader took the *test process*
+/// down with it rather than merely weakening one assertion (#69).
 pub struct Feeder {
     stop: Arc<AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
@@ -195,7 +276,7 @@ impl Feeder {
         let stop = Arc::new(AtomicBool::new(false));
         let s = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            let Some(mut w) = open_fifo_writer(&fifo) else { return };
             let chunk = vec![0u8; 64 * 1024];
             while !s.load(Ordering::Relaxed) {
                 if w.write_all(&chunk).is_err() {

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::slowfile::SlowTimer;
-use crate::verbose::LinePulse;
+use crate::verbose::completed_lines;
 
 /// Read `cp`'s stdout: detect `-v` line boundaries to pulse the slow timer, and — only when the
 /// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
@@ -36,7 +36,6 @@ pub(crate) fn relay_stdout(
     tx: &SyncSender<Vec<u8>>,
     relay: bool,
 ) {
-    let mut pulse = LinePulse::new();
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -47,7 +46,7 @@ pub(crate) fn relay_stdout(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if pulse.feed(&buf[..n]) > 0 {
+                if completed_lines(&buf[..n]) > 0 {
                     crate::lock_shared(slow).on_pulse(Instant::now());
                 }
                 if relay && tx.send(buf[..n].to_vec()).is_err() {
@@ -219,9 +218,12 @@ mod tests {
         // deleting it left the whole suite green, because every other test in this file feeds it
         // a finite reader that ends at EOF regardless (#59).
         //
-        // Under that deletion this test does not fail, it *hangs* — the loop reads an endless
-        // reader forever with nowhere to put the bytes. That is how a non-terminating rule shows
-        // up, and how `cargo-mutants` scores it (a timeout is a detection).
+        // Under that deletion the relay does spin forever on the endless reader, but this test
+        // still *fails* rather than hanging: the wait below is a poll to a two-second deadline, so
+        // it reports at 2.03 s with `relay.is_finished()` false (measured). The hang narrative
+        // belongs to `a_real_read_error_ends_the_stdout_relay_too`, which has no deadline and does
+        // time out — that one is scored the way `cargo-mutants` scores a non-terminating rule
+        // (a timeout is a detection). Here the deadline is what turns it into a normal red (#69 D).
         let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(1);
         let slow = Mutex::new(SlowTimer::new(Duration::from_millis(100)));
         let relay = std::thread::spawn(move || {

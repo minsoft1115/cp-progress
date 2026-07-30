@@ -7,9 +7,16 @@
 //! exercises the same handling — flag -> re-query -> relayout.)
 //!
 //! The copy source is a FIFO fed by a throttled writer thread, so the copy stays alive for as
-//! long as we keep feeding: we deterministically observe a wide footer, resize, observe a narrow
+//! long as we keep feeding: we deterministically observe a wide footer, resize, observe a narrower
 //! redraw, then stop feeding so cp hits EOF and exits. This avoids any race with copy speed (a
 //! plain large regular file can finish before the post-resize redraw on fast storage).
+//!
+//! `sigwinch_relayouts_the_footer_to_the_new_width` runs that cycle **twice**, and the first pass
+//! is not a warm-up: a narrow footer appearing at all is also what the 1 s fallback re-query
+//! produces, so the signal's contribution is timing rather than outcome. The first resize is
+//! deliberately unsignalled to put the fallback's clock at a known zero, and only then is the
+//! second one signalled and timed (#69). The parenthetical above is why that works — the harness
+//! is the sole source of SIGWINCH here.
 
 use std::fs::File;
 use std::io::Write;
@@ -18,14 +25,14 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::{read_retry, strip_sgr, TmpDir};
+use common::{open_fifo_writer, openpty_cloexec, read_retry, strip_sgr, TmpDir};
 
 /// Visible widths of the footer redraws (each `\r`-delimited segment containing a `%`) in `data`.
 fn footer_widths(data: &[u8]) -> Vec<usize> {
@@ -45,7 +52,7 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -74,9 +81,10 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     let feeder = {
         let (fifo, stop) = (fifo.clone(), Arc::clone(&stop_feed));
         std::thread::spawn(move || {
-            // Blocks until cp opens the read end. Rust ignores SIGPIPE, so a closed reader
-            // surfaces as a write error rather than killing the test.
-            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            // Waits, with a deadline, until cp opens the read end: an open that could block
+            // forever would take this thread's join — and so the test — down with it (#69).
+            // Rust ignores SIGPIPE, so a closed reader surfaces as a write error, not a kill.
+            let Some(mut w) = open_fifo_writer(&fifo) else { return };
             let chunk = vec![0u8; 64 * 1024];
             while !stop.load(Ordering::Relaxed) {
                 if w.write_all(&chunk).is_err() {
@@ -104,35 +112,89 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
         })
     };
 
+    // Three stages, because "a narrow footer eventually appeared" does not need SIGWINCH at all:
+    // the 1 s fallback re-query produces one too, and deleting the `flag::register(SIGWINCH, …)`
+    // line left this test — and the whole suite — green (#69). What the signal actually buys is
+    // *promptness*, so promptness is what gets measured.
+    //
+    // Timing the signal alone would only catch the mutant by luck. The fallback fires 1 s after
+    // the last query, and the phase of that cycle relative to the resize is arbitrary, so a
+    // deleted registration would still relayout in anywhere from 0 to 1000 ms. Stage 2 removes the
+    // luck: it resizes *without* signalling and waits for the relayout, which can only have come
+    // from a fallback re-query — so when it is observed, the 1 s clock has just been reset. Stage 3
+    // then resizes and signals immediately, leaving the fallback ~1 s away and the signal ~1 tick.
+    // Measured: 6.6 ms signalled against 1.005 s from the fallback, so the 400 ms threshold below
+    // has two orders of magnitude of room on both sides.
+    //
+    // Stage 2's "without signalling" is load-bearing and worth stating, because `TIOCSWINSZ` on a
+    // master *can* make the kernel deliver SIGWINCH to the terminal's foreground process group. It
+    // does not here: cprog never calls `setsid`/`TIOCSCTTY`, so this pty is not its controlling
+    // terminal and the explicit `killpg` below is the only SIGWINCH it ever sees. Removing that
+    // one call makes stage 3 take 1.004 s — the same fallback timing as deleting the registration,
+    // which is what proves stage 2 relayouts on the fallback and not on a signal (#69).
+    //
+    // Each stage waits for the width to *drop*, rather than for an absolute number. A footer is
+    // laid out against the terminal width and then trimmed of trailing blanks, and the relationship
+    // is not proportional: 80 columns yields 61-63, 50 yields 42, 30 yields 30. Pinning those
+    // literals would encode three incidental numbers, so the stages compare against the width they
+    // measured — hence `wide` and `mid` being learned rather than written down.
+    //
+    // `DROP` separates a real relayout from the jitter of a changing ETA field, which is the 2
+    // columns of that 61-63 spread. The two real drops are 63->42 and 42->30, so 6 leaves 3x
+    // headroom over the jitter and still sits 2x under the smaller of the two drops.
+    const DROP: usize = 6;
     let track: [u8; 3] = [0xE2, 0x96, 0x91]; // ░ (indeterminate bar, FIFO source has no total)
+    let set_cols = |cols: u16| {
+        let ws = Winsize { ws_row: 24, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
+        unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws) };
+    };
+    // A region spans the redraws either side of a relayout, so "did the width drop" has to ask
+    // whether *any* redraw in it is narrower — a max would keep reporting the pre-resize width
+    // forever — while learning the new width is the *narrowest* one in that same region.
+    let widest = |data: &[u8]| footer_widths(data).into_iter().max();
+    let narrowest = |data: &[u8]| footer_widths(data).into_iter().min();
+    let dropped_below = |data: &[u8], from: usize| {
+        footer_widths(data).iter().any(|&w| w + DROP <= from)
+    };
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
+    // The wide footer's own width, learned rather than assumed, and stage 2's offset.
+    let mut wide: Option<usize> = None;
+    let mut mid_off: Option<usize> = None;
+    // The 50-column width, stage 3's offset, and the instant the SIGWINCH went out.
+    let mut mid: Option<usize> = None;
     let mut resize_off: Option<usize> = None;
-    let mut narrow_seen = false;
+    let mut signalled_at: Option<Instant> = None;
+    let mut narrow_after: Option<Duration> = None;
     loop {
         match read_retry(&mut master, &mut buf) {
             0 => break,
             n => {
                 out.extend_from_slice(&buf[..n]);
-                match resize_off {
-                    // Once the wide (80-col) footer is up, shrink to 30 cols and signal cprog.
-                    None => {
-                        if out.windows(3).any(|w| w == track) {
-                            let narrow =
-                                Winsize { ws_row: 24, ws_col: 30, ws_xpixel: 0, ws_ypixel: 0 };
-                            unsafe { libc::ioctl(master_fd, libc::TIOCSWINSZ, &narrow) };
-                            killpg(pgid, Signal::SIGWINCH).unwrap();
-                            resize_off = Some(out.len());
-                        }
+                match (mid_off, resize_off) {
+                    // Stage 1 -> 2: the 80-column footer is up. Shrink to 50 and say nothing.
+                    (None, _) if out.windows(3).any(|w| w == track) => {
+                        wide = widest(&out);
+                        set_cols(50);
+                        mid_off = Some(out.len());
                     }
-                    // After the resize, wait to observe a narrow redraw, then stop feeding so
-                    // cp reaches EOF and cprog exits — no dependence on copy speed.
-                    Some(off)
-                        if !narrow_seen
-                            && footer_widths(&out[off..]).iter().any(|&w| w <= 30) =>
+                    // Stage 2 -> 3: the width dropped with no signal sent, so that was the fallback
+                    // re-querying and its 1 s clock is now at zero. Shrink to 30 and signal; from
+                    // here the two mechanisms are ~1 s apart.
+                    (Some(off), None) if dropped_below(&out[off..], wide.unwrap()) => {
+                        mid = narrowest(&out[off..]);
+                        set_cols(30);
+                        killpg(pgid, Signal::SIGWINCH).unwrap();
+                        signalled_at = Some(Instant::now());
+                        resize_off = Some(out.len());
+                    }
+                    // Stage 3: the narrow redraw. Stop feeding so cp reaches EOF and cprog exits
+                    // — no dependence on copy speed.
+                    (_, Some(off))
+                        if narrow_after.is_none() && dropped_below(&out[off..], mid.unwrap()) =>
                     {
-                        narrow_seen = true;
+                        narrow_after = Some(signalled_at.unwrap().elapsed());
                         stop_feed.store(true, Ordering::Relaxed);
                     }
                     _ => {}
@@ -147,11 +209,20 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     let _ = watchdog.join();
 
     assert!(!hung.load(Ordering::Relaxed), "cprog hung; relayout never produced a narrow footer");
-    assert!(resize_off.is_some(), "footer never appeared, so resize was not exercised");
+    assert!(mid_off.is_some(), "footer never appeared, so resize was not exercised");
+    assert!(resize_off.is_some(), "the unsignalled shrink never relayouted, so the fallback clock \
+                                   was never zeroed and the timing below would prove nothing");
     let widths = footer_widths(&out);
     assert!(widths.iter().any(|&w| w > 40), "some wide (80-col) footers before resize: {widths:?}");
-    // The relayout produced a narrow (<=30) footer *after* the SIGWINCH, proving the re-query.
-    assert!(narrow_seen, "footer must re-lay-out to the narrow width after SIGWINCH: {widths:?}");
+    // The relayout produced a narrow (<=35) footer *after* the SIGWINCH, proving the re-query.
+    let took = narrow_after
+        .unwrap_or_else(|| panic!("footer must re-lay-out to the narrow width: {widths:?}"));
+    // 400 ms sits between the two explanations: a served signal relayouts on the next render tick
+    // (8 ms here), while the fallback — just reset in stage 2 — cannot arrive for ~1 s.
+    assert!(
+        took < Duration::from_millis(400),
+        "the relayout took {took:?}, which is the 1 s fallback re-query, not the SIGWINCH: {widths:?}"
+    );
 }
 
 #[test]
@@ -177,7 +248,7 @@ fn an_unsized_terminal_is_laid_out_as_eighty_columns() {
             ws_xpixel: 0,
             ws_ypixel: 0,
         });
-        let pty = openpty(ws.as_ref(), None).expect("openpty");
+        let pty = openpty_cloexec(ws.as_ref());
         let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
         let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -245,7 +316,7 @@ fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -287,7 +358,7 @@ fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {
     let feeder = {
         let (fifo, stop) = (fifo.clone(), Arc::clone(&stop_feed));
         std::thread::spawn(move || {
-            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            let Some(mut w) = open_fifo_writer(&fifo) else { return };
             let chunk = vec![0u8; 64 * 1024];
             while !stop.load(Ordering::Relaxed) {
                 if w.write_all(&chunk).is_err() {

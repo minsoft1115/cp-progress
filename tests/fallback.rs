@@ -12,10 +12,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 
 mod common;
-use common::{read_retry, TmpDir};
+use common::{openpty_cloexec, read_retry, TmpDir, Watchdog};
 
 /// Locate a tool on the current PATH.
 fn find_on_path(tool: &str) -> PathBuf {
@@ -43,7 +43,7 @@ fn missing_stdbuf_falls_back_to_passthrough() {
     std::os::unix::fs::symlink(find_cp(), bindir.join("cp")).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -62,6 +62,8 @@ fn missing_stdbuf_falls_back_to_passthrough() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -73,6 +75,8 @@ fn missing_stdbuf_falls_back_to_passthrough() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert!(status.success(), "copy should still succeed");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024);
@@ -102,7 +106,7 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
     assert!(!bindir.join("cp").exists(), "precondition: cp is not reachable");
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -119,6 +123,8 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -130,6 +136,8 @@ fn stdbuf_present_but_cp_missing_surfaces_as_cp_exiting_127() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert_eq!(status.code(), Some(127), "cprog returns the child's 127 verbatim");
     let text = String::from_utf8_lossy(&out);
@@ -201,7 +209,7 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
     }
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -222,6 +230,8 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -233,6 +243,8 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert!(status.success(), "the copy still succeeds via passthrough: {status:?}");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 200 * 1024 * 1024, "and really happened");

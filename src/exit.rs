@@ -7,14 +7,20 @@
 //! numbered rows, so the bare `D2` used to name nothing there — and `D2` in exceptions.md is an
 //! unrelated rule about trailing bytes (#61 C).
 //!
-//! The `128 + signal` fallback is unreachable, and kept anyway. For the standard signals the
-//! re-raise goes through [`signal_hook::low_level::emulate_default_handler`], which ends in
-//! `abort()` if its own raise ever returns — so a failure there dies of SIGABRT instead of
-//! falling through. For the realtime range cprog raises directly, and that raise *can* return
-//! when the signal is blocked — but a signal blocked in cprog is blocked in `cp` too (the mask is
-//! inherited across `spawn`, measured), so `cp` cannot have died of it and the branch is never
-//! entered with a blocked signal in hand. It costs one line and covers a wait status no kernel
-//! produces (docs/exceptions.md A1/A1a, F15).
+//! The `128 + signal` fallback is unreachable, and kept anyway. What makes it unreachable is
+//! **`WTERMSIG`**: the only signals that reach [`finalize`] are ones that actually terminated
+//! `cp`, and cprog cannot be handed any other kind. The re-raise mechanics then fall out in three
+//! shapes. A standard signal whose default action is *termination* goes through
+//! [`signal_hook::low_level::emulate_default_handler`], which ends in `abort()` if its own raise
+//! ever returns — a failure there dies of SIGABRT rather than falling through. A standard signal
+//! whose default action is *ignore* or *stop* does **not** abort: the emulation performs that
+//! default, returns `Ok`, and the fallback really is reached (`finalize(Signal(SIGWINCH))` returns
+//! 156, `SIGCHLD` 145 — measured). Those are exactly the signals `WTERMSIG` can never name, which
+//! is why the sentence above is about wait statuses and not about `abort`. For the realtime range
+//! cprog raises directly, and that raise *can* return when the signal is blocked — but a signal
+//! blocked in cprog is blocked in `cp` too (the mask is inherited across `spawn`, measured), so
+//! `cp` cannot have died of it. It costs one line and covers a wait status no kernel produces
+//! (docs/exceptions.md A1/A1a, F15).
 
 use std::process::ExitStatus;
 
@@ -67,11 +73,16 @@ pub fn finalize(disp: ExitDisposition) -> i32 {
 /// a hand-rolled version it reports whether it worked. Two consequences are worth stating
 /// because neither is visible at the call site:
 ///
-/// * **It does not return on failure — it aborts.** Its standard-signal path ends in `abort()`
-///   if its own raise comes back, so a failed re-raise dies of SIGABRT rather than falling
-///   through to `128 + s`. Getting there needs `sigaction` to fail on a signal that came from
-///   `WTERMSIG`, which does not happen on Linux; a *blocked* signal is not enough, because the
-///   emulation unblocks first (measured: a blocked SIGTERM still terminates as SIGTERM).
+/// * **For a signal that terminates, it does not return on failure — it aborts.** That path ends
+///   in `abort()` if its own raise comes back, so a failed re-raise dies of SIGABRT rather than
+///   falling through to `128 + s`. Getting there needs `sigaction` to fail on a signal that came
+///   from `WTERMSIG`, which does not happen on Linux; a *blocked* signal is not enough, because
+///   the emulation unblocks first (measured: a blocked SIGTERM still terminates as SIGTERM).
+/// * **For a signal whose default action is ignore or stop, it returns normally**, having done
+///   that default — so `reraise` comes back and `finalize` does fall through to `128 + s`
+///   (measured: `Signal(SIGWINCH)` -> 156, `Signal(SIGCHLD)` -> 145). This is not a hole, because
+///   such a signal cannot arrive: `WTERMSIG` only names what terminated `cp`. Stating the abort as
+///   if it covered every standard signal was wrong (#69 D).
 /// * **It does not know the realtime range**, which comes back `EINVAL`. Raising those directly
 ///   is right: cprog installs handlers only for SIGINT/TERM/HUP/QUIT/WINCH/TSTP, so a signal
 ///   arriving here is guaranteed to have its default disposition. Without this branch a realtime

@@ -13,11 +13,10 @@ use std::os::fd::{FromRawFd, IntoRawFd};
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-use nix::pty::openpty;
 use nix::sys::stat::Mode;
 
 mod common;
-use common::{contains, cprog_exec, drain, Feeder, TmpDir};
+use common::{contains, cprog_exec, drain, openpty_cloexec, Feeder, TmpDir, Watchdog};
 
 #[test]
 fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
@@ -32,7 +31,7 @@ fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty(None, None).expect("openpty");
+    let pty = openpty_cloexec(None);
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
@@ -104,7 +103,7 @@ fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
     // Big enough that a footer would certainly have been drawn at a 1 ms threshold.
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
-    let pty = openpty(None, None).expect("openpty");
+    let pty = openpty_cloexec(None);
     let master_out: OwnedFd = pty.master.try_clone().unwrap();
     let master_err: OwnedFd = pty.master.try_clone().unwrap();
     let slave_fd = pty.slave.as_raw_fd();
@@ -126,6 +125,14 @@ fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
 
     // Read the *slave* — anything cprog wrote to the master surfaces there. Draining keeps a
     // regression visible as a failed assertion rather than a hang on a full input queue.
+    //
+    // The 30 s bound on the poll below is not on its own enough to keep that promise: the loop
+    // can end by *deadline* rather than by the child exiting, and the `child.wait()` after it is
+    // unconditional — so a cprog that never exits was still an unbounded wait. Sleeping before
+    // `cmd.exec()` in the passthrough path left this test running forever, which is exactly the
+    // hang the comment above says it avoids. The watchdog is armed past the poll's deadline so it
+    // only ever fires on that overrun (#69).
+    let dog = Watchdog::arm(child.id() as i32, 40);
     let mut seen = Vec::new();
     let mut slave = unsafe { File::from_raw_fd(pty.slave.into_raw_fd()) };
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -136,6 +143,8 @@ fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
         }
     }
     let status = child.wait().expect("wait cprog");
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited within the poll deadline");
 
     assert!(status.success(), "the copy itself still succeeds: {status:?}");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "and really happened");

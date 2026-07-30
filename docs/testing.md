@@ -65,7 +65,10 @@
   걸지 않는다 — cprog는 `-v`를 파싱하지 않아 로케일 고정이 불필요하고, 비-ASCII 파일명을 보존한다.)
 - fault injection("sampler/relay가 중간에 실패" 정리 경로)은 별도 feature 없이 유닛으로
   덮는다: `dest_stat_error_skips_tick_and_keeps_model`, `proc_error_skips_tick`,
-  `io_failure_is_returned_and_drop_never_panics`, `tests/exit_contract.rs`.
+  `io_failure_is_returned_and_drop_never_panics` + `drop_never_panics_when_the_erase_itself_fails`,
+  `tests/exit_contract.rs`. 앞의 두 개는 짝이다 — 첫 write부터 실패하는 writer는 footer가 화면에
+  올라가기 전에 `draw`를 끝내므로 `Drop`의 `erase()`가 `rows == 0` 조기반환을 타고, 두 번째가
+  fail-after-N writer로 draw를 성공시켜 그 `erase()`를 실제로 밟게 한다(#69).
 
 > **핵심:** fake cp는 flush를 제어하므로 실전 버퍼링을 못 잡는다. 최소 하나의 통합 테스트는
 > **진짜 `cp`** 로 스트리밍을 확인해야 한다.

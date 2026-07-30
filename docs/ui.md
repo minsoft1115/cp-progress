@@ -214,7 +214,7 @@ percent가 가장 정보량이 커서 최후까지 남긴다. size가 rate보다
 
 ## 색/글리프 정책
 
-- 색은 stdout이 TTY이고 `TERM`/`NO_COLOR`이 허용할 때만.
+- 색 여부(`Style.color`)는 **`NO_COLOR`와 `TERM`만** 본다 — `term::color_from`은 TTY를 검사하지 않는다. TTY 검사는 색이 아니라 *무엇을 언제 그리는지*를 정하는 별개 게이트다: footer는 managed 진입 조건(전경 pgrp + stdout·stderr가 같은 TTY)이 서고, 버전 공지는 **stderr가 TTY일 때** 나온다(`messages::version_notice`의 `stderr_tty`). 그래서 `cprog --version > /dev/null` 처럼 stdout을 리다이렉트해도 stderr가 터미널이면 공지는 **dim(`ESC[2m`)으로 나온다** — 실측했다. 예전 서술("색은 stdout이 TTY이고 …")은 이 경로에서 거짓이었다(#69 D).
   - 바 채움: green
   - 요약 `✓` green, `✗` red
   - (eta dim은 미구현 — 레이아웃 폭 계산이 SGR을 세지 않도록 하려면 폭 측정 후 별도 색칠이
