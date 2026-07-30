@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::slowfile::SlowTimer;
-use crate::verbose::LinePulse;
+use crate::verbose::completed_lines;
 
 /// Read `cp`'s stdout: detect `-v` line boundaries to pulse the slow timer, and — only when the
 /// user actually asked for `-v` — relay the bytes to the main writer. Stops on EOF or a closed
@@ -36,7 +36,6 @@ pub(crate) fn relay_stdout(
     tx: &SyncSender<Vec<u8>>,
     relay: bool,
 ) {
-    let mut pulse = LinePulse::new();
     let mut buf = [0u8; 8192];
     loop {
         match reader.read(&mut buf) {
@@ -47,7 +46,7 @@ pub(crate) fn relay_stdout(
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                if pulse.feed(&buf[..n]) > 0 {
+                if completed_lines(&buf[..n]) > 0 {
                     crate::lock_shared(slow).on_pulse(Instant::now());
                 }
                 if relay && tx.send(buf[..n].to_vec()).is_err() {

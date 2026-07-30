@@ -111,7 +111,7 @@
 |---|---|---|---|
 | D1 | **파이프에서 `cp`가 block-buffer** | `stdbuf -oL`로 라인버퍼 강제 → `-v`가 파일마다 실시간 도착. 진짜 `cp`로 통합 검증(가짜 cp는 flush를 제어할 수 있어 이 버그를 못 잡음) | ✅ `tests/managed.rs::managed_verbose_lines_interleave_with_footer_during_copy` |
 | D2 | **개행 없는 꼬리 바이트** | 받는 즉시 relay. 개행을 기다리며 붙잡지 않는다 | ✅ `capture.rs::relays_partial_line_without_waiting_for_newline` |
-| D3 | **`-v` 줄이 read 청크 경계에 걸침** | 부분 줄은 pending으로 두고, `\n`이 도착하는 청크에서 **정확히 한 번** 펄스. 뒤집으면 같은 규칙이다 — **줄을 완성하지 못한 read는 펄스를 내지 않는다**(펄스 = 새 항목이므로, 파편에서 항목 시계가 시작되면 안 된다) | ✅ 파서는 `verbose::LinePulse`, `verbose.rs::newline_split_across_chunks_pulses_when_completed`, 캡처 쪽 배선은 `capture.rs::a_chunk_without_a_line_boundary_does_not_pulse` (#53) |
+| D3 | **`-v` 줄이 read 청크 경계에 걸침** | `\n`이 도착하는 청크에서 **정확히 한 번** 펄스. 상태는 필요 없다 — 종결 `\n`은 오직 한 청크에만 들어가므로, 청크별 `\n` 개수를 세는 것만으로 걸친 줄이 한 번만 펄스한다(예전 서술은 "부분 줄을 pending으로 둔다"였는데, 그 플래그는 펄스 수에 관여하지 않았다 — #69 D에서 플래그와 함께 삭제). 뒤집으면 같은 규칙이다 — **줄을 완성하지 못한 read는 펄스를 내지 않는다**(펄스 = 새 항목이므로, 파편에서 항목 시계가 시작되면 안 된다) | ✅ 파서는 `verbose::completed_lines`, `verbose.rs::newline_split_across_chunks_pulses_when_completed`, 캡처 쪽 배선은 `capture.rs::a_chunk_without_a_line_boundary_does_not_pulse` (#53) |
 | D4 | **파일명에 개행·NUL·제어문자·ANSI** | `-v` 내용을 파싱하지 않으므로 로직 무영향(`\n`만 세고, 그마저도 "펄스가 하나 더" 수준). 경로는 `/proc` readlink에서 얻음 | ✅ `verbose.rs::arbitrary_bytes_only_newlines_count` |
 | D5 | **사용자가 이미 `-v`를 줌** | 이중 주입 안 함(`-v` 하나만) | ✅ `process.rs::managed_does_not_double_inject_verbose` |
 | D6 | **stdout/stderr 인터리브 순서** | 파이프 둘을 각각 중계하므로 상대 순서가 순정 `cp`와 미세하게 다를 수 있음 | 📄 `capture-and-verbose.md` |
