@@ -95,6 +95,13 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
     // *deterministically* still-running (no copy-speed race), copy from a FIFO with no data:
     // cp blocks forever on read, the reader threads block relaying its (empty) stdout, and
     // without the teardown fix `join()` would deadlock. cprog must terminate cp and exit.
+    //
+    // What makes this SIGTERM's test rather than a second copy of the SIGINT one below: the
+    // teardown erase. Everything else here is weaker than the sibling — `signal()` merely being
+    // *some* signal against its exact `Some(SIGINT)`, on an identical setup — and dropping SIGTERM
+    // from cprog's registration array left the whole suite green, signals 7/7 and units 215,
+    // because PR_SET_PDEATHSIG still reaps cp and the default SIGTERM action still exits signaled.
+    // Only the erase needs the *handler* to have run, so only the erase notices (#69 C).
     let tmp = TmpDir::new("term");
     let fifo = tmp.0.join("src.fifo");
     let dst = tmp.0.join("dst.bin");
@@ -154,7 +161,22 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
     assert!(sent, "cp never started, so the teardown path was not exercised");
     assert!(!dog.hung(), "cprog hung after SIGTERM (reader join deadlock)");
     // cprog forwards the termination to cp and re-raises, exiting signaled.
-    assert!(status.signal().is_some(), "cprog should exit signaled, got {status:?}");
+    assert_eq!(
+        status.signal(),
+        Some(Signal::SIGTERM as i32),
+        "cprog should exit signaled with the signal it was sent, got {status:?}"
+    );
+    // The footer was cleared on the way out, which is only possible if cprog *caught* SIGTERM:
+    // the default action would have killed it mid-render with the footer still on screen. A bare
+    // `\r\x1b[K` — nothing between the carriage return and the erase-to-EOL — is what the teardown
+    // emits; an ordinary redraw ends `...text\x1b[K`, so this cannot be satisfied by a redraw.
+    let last_bar = rfind(&out, "\u{2591}".as_bytes()).expect("saw an indeterminate bar");
+    let tail = &out[last_bar + 3..];
+    assert!(
+        tail.windows(4).any(|w| w == b"\r\x1b[K"),
+        "footer must be cleared by a bare erase after the last bar: tail={:?}",
+        String::from_utf8_lossy(tail)
+    );
 }
 
 #[test]

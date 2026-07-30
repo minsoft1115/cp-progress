@@ -527,20 +527,27 @@ mod tests {
 
     #[test]
     fn percent_formats_two_decimals_right_aligned() {
-        // Right-aligned to the width of "100.00" so the decimal point and " %" stay put.
+        // Right-aligned to the width of "100.00" so the decimal point and " %" stay put, which
+        // also fixes the field at 8 columns and keeps the fields after it from shifting as the
+        // value grows. Spelling the expected strings out states both at once: a separate
+        // width-only test could not catch anything these cannot, since every string here is
+        // already 8 columns wide (#69 C).
         assert_eq!(format_percent(Some(62.4)), " 62.40 %");
         assert_eq!(format_percent(Some(100.0)), "100.00 %");
         assert_eq!(format_percent(Some(0.0)), "  0.00 %");
+        // One-digit-integer, two-significant-hundredths: the shapes the deleted test added.
+        assert_eq!(format_percent(Some(5.5)), "  5.50 %");
+        assert_eq!(format_percent(Some(62.34)), " 62.34 %");
         // Floors, so a nearly-done file never shows a premature 100.00.
         assert_eq!(format_percent(Some(99.999)), " 99.99 %");
         assert_eq!(format_percent(None), "    -- %");
-    }
-
-    #[test]
-    fn percent_field_is_constant_width() {
-        // Fixed 8 columns so the fields after it never shift as the value grows.
-        for p in [Some(0.0), Some(5.5), Some(62.34), Some(100.0), None] {
-            assert_eq!(format_percent(p).chars().count(), 8, "for {p:?}");
+        for s in [
+            format_percent(Some(0.0)),
+            format_percent(Some(5.5)),
+            format_percent(Some(100.0)),
+            format_percent(None),
+        ] {
+            assert_eq!(s.chars().count(), 8, "the field is a constant 8 columns: {s:?}");
         }
     }
 

@@ -69,25 +69,19 @@ mod tests {
     }
 
     #[test]
-    fn fast_file_below_threshold_is_not_slow() {
-        // docs/testing.md B5: a very fast file (< threshold) never shows a bar.
-        let mut t = timer();
-        let t0 = Instant::now();
-        t.on_pulse(t0);
-        assert!(!t.is_slow(t0 + Duration::from_millis(50)));
-    }
-
-    #[test]
     fn threshold_boundary_is_exclusive() {
-        // docs/testing.md B6: just-before / exact / just-after the threshold.
+        // docs/testing.md B6: just-before / exact / just-after the threshold. And B5 either side
+        // of it — a very fast file shows no bar, a clearly slow one does — because the comparison
+        // is monotonic in elapsed time, so the two boundary-adjacent assertions already imply the
+        // far ones. Both mirrors used to be separate tests (#61 B took the upper, #69 C the lower).
         let mut t = timer();
         let t0 = Instant::now();
         t.on_pulse(t0);
+        assert!(!t.is_slow(t0 + Duration::from_millis(50)), "well before -> no bar (B5)");
         assert!(!t.is_slow(t0 + Duration::from_millis(99)), "just before -> no bar");
         assert!(!t.is_slow(t0 + THRESHOLD), "exactly threshold -> no bar (`>` is exclusive)");
         assert!(t.is_slow(t0 + THRESHOLD + Duration::from_nanos(1)), "just after -> bar");
-        // Well past it, too — the case a separate test used to make on its own (#61 B).
-        assert!(t.is_slow(t0 + Duration::from_millis(150)));
+        assert!(t.is_slow(t0 + Duration::from_millis(150)), "well after -> bar");
     }
 
     #[test]
@@ -125,8 +119,8 @@ mod tests {
         assert!(!t.is_slow(Instant::now()));
     }
 
-    #[test]
-    fn default_threshold_is_100ms() {
-        assert_eq!(DEFAULT_SLOW_THRESHOLD, Duration::from_millis(100));
-    }
+    // `DEFAULT_SLOW_THRESHOLD`'s value is pinned by
+    // `crate::env_knobs::unset_knobs_are_the_values_the_docs_promise`, which asserts the same
+    // 100 ms *and* that the knob wiring reaches it. A local `assert_eq!` against the constant had
+    // exactly one killer — changing the constant — and that killer is already this one (#69 C).
 }
