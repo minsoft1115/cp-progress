@@ -11,13 +11,19 @@ use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 
 mod common;
-use common::{contains, read_retry};
+use common::{contains, openpty_cloexec, read_retry, Watchdog};
 use common::TmpDir;
 
 /// Read a PTY master to EOF.
+///
+/// EOF is the only exit, and it arrives only because cprog exited — so every caller arms a
+/// [`Watchdog`] first. Without one, a cprog that never exits blocks the test forever instead of
+/// failing it, and a hang is the one failure a suite cannot report (CI shows a timeout with no
+/// test named). Sleeping before `cmd.exec()` in the passthrough path left both tests in this file
+/// running forever; with the watchdog they go red (#69).
 fn drain_all(master: &mut File) -> Vec<u8> {
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -38,7 +44,7 @@ fn forced_passthrough_disables_the_tui_even_on_a_pty() {
     std::fs::write(&src, vec![0u8; 64 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -60,10 +66,13 @@ fn forced_passthrough_disables_the_tui_even_on_a_pty() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    let dog = Watchdog::arm(child.id() as i32, 30); // see `drain_all` (#69)
 
     let mut master = File::from(pty.master);
     let out = drain_all(&mut master);
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert!(status.success(), "the copy still succeeds");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 64 * 1024 * 1024);
@@ -78,7 +87,7 @@ fn forced_passthrough_silences_the_version_notice() {
     // tests/managed.rs::help_over_pty_passes_through_but_names_cprog). With it — even set to
     // the empty string, the value-agnostic rule — the screen shows only what cp printed.
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -94,10 +103,13 @@ fn forced_passthrough_silences_the_version_notice() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    let dog = Watchdog::arm(child.id() as i32, 30); // see `drain_all` (#69)
 
     let mut master = File::from(pty.master);
     let out = drain_all(&mut master);
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
     let text = String::from_utf8_lossy(&out);
 
     assert_eq!(status.code(), Some(0));

@@ -8,9 +8,8 @@
 
 mod common;
 
-use common::{render_screen, Feeder, TmpDir};
-use nix::pty::openpty;
-use nix::sys::termios::Termios;
+use common::{openpty_cloexec, render_screen, Feeder, TmpDir, Watchdog};
+
 use std::fs::File;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::process::{Command, Stdio};
@@ -32,7 +31,7 @@ fn run(tag: &str, pass_verbose: bool, cols: u16) -> String {
     assert_eq!(unsafe { libc::mkfifo(cfifo.as_ptr(), 0o600) }, 0, "mkfifo");
     let feeder = Feeder::start(fifo.clone());
 
-    let pty = openpty(Some(&winsize(24, cols)), None::<&Termios>).unwrap();
+    let pty = openpty_cloexec(Some(&winsize(24, cols)));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -57,6 +56,9 @@ fn run(tag: &str, pass_verbose: bool, cols: u16) -> String {
     };
     drop(pty.slave);
 
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
+
     // The FIFO keeps the copy alive for as long as it is fed, so watch until the footer is up,
     // then stop feeding: cp reaches EOF, cprog exits and the master finally sees EOF too. Reading
     // to EOF first would wait forever.
@@ -75,6 +77,8 @@ fn run(tag: &str, pass_verbose: bool, cols: u16) -> String {
         }
     }
     child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
     String::from_utf8_lossy(&out).into_owned()
 }
 

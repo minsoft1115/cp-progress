@@ -9,11 +9,10 @@ use std::os::fd::{FromRawFd, IntoRawFd, RawFd};
 use std::os::raw::c_char;
 use std::time::{Duration, Instant};
 
-use nix::pty::openpty;
 use nix::sys::stat::Mode;
 
 mod common;
-use common::{contains, cprog_exec, drain, rfind, Feeder, TmpDir};
+use common::{contains, cprog_exec, drain, open_fifo_writer, openpty_cloexec, rfind, Feeder, TmpDir};
 
 /// Fork a child that establishes a controlling terminal (setsid + TIOCSCTTY) and execs `cprog`
 /// as the foreground process group. Returns `(child_pid, master File, master_fd)`.
@@ -24,7 +23,7 @@ fn spawn_foreground_cprog(fifo: &std::path::Path, dst: &std::path::Path) -> (i32
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty(None, None).expect("openpty");
+    let pty = openpty_cloexec(None);
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
     let pid = unsafe { libc::fork() };
@@ -103,7 +102,7 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty(None, None).expect("openpty");
+    let pty = openpty_cloexec(None);
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
@@ -209,7 +208,7 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty(None, None).expect("openpty");
+    let pty = openpty_cloexec(None);
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
@@ -334,7 +333,7 @@ fn ctrl_z_during_teardown_still_stops_the_process() {
     nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd = pty.slave.try_clone().unwrap();
     let err_fd = pty.slave.try_clone().unwrap();
 
@@ -356,7 +355,7 @@ fn ctrl_z_during_teardown_still_stops_the_process() {
     drop(pty.slave);
     let pid = Pid::from_raw(child.id() as i32);
 
-    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let _writer = open_fifo_writer(&fifo).expect("cp never opened the FIFO to read");
     let mut master = File::from(pty.master);
     let fd = std::os::fd::AsRawFd::as_raw_fd(&master);
 
@@ -416,7 +415,7 @@ fn resuming_drops_the_rate_history_that_spans_the_stop() {
     nix::unistd::mkfifo(&fifo, Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = nix::pty::Winsize { ws_row: 24, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd = pty.slave.try_clone().unwrap();
     let err_fd = pty.slave.try_clone().unwrap();
 

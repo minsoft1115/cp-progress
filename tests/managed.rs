@@ -12,10 +12,10 @@ use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 
 mod common;
-use common::{read_retry, TmpDir};
+use common::{openpty_cloexec, read_retry, TmpDir, Watchdog};
 
 #[test]
 fn managed_verbose_lines_interleave_with_footer_during_copy() {
@@ -32,7 +32,7 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
     const EACH: usize = 64 * 1024 * 1024;
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).expect("openpty");
+    let pty = openpty_cloexec(Some(&ws));
     let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
     let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -61,6 +61,8 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
             .expect("spawn cprog")
     };
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -72,6 +74,8 @@ fn managed_verbose_lines_interleave_with_footer_during_copy() {
         }
     }
     let status = child.wait().expect("wait cprog");
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert!(status.success(), "cprog exited non-zero");
     for i in 0..N {
@@ -147,14 +151,20 @@ fn a_c_locale_copy_emits_nothing_outside_ascii() {
     let dst = tmp.0.join(format!("dst_{}.bin", "x".repeat(90)));
     // The whole point is "any byte above 127 is cprog's", and the footer's name row prints the
     // destination path. A non-ASCII TMPDIR would fail this test for a reason that has nothing to
-    // do with cprog, so skip rather than mislead.
+    // do with cprog, so skip rather than mislead — but say so. A bare `return` reports `ok`,
+    // which reads as coverage of the four glyph positions this test enumerates when in fact
+    // nothing was checked (#61 D, #69).
     if !dst.to_string_lossy().is_ascii() {
+        common::notice(
+            "SKIP a_c_locale_copy_emits_nothing_outside_ascii: TMPDIR is not ASCII, so the \
+             destination path would fail the byte-range assertion on its own",
+        );
         return;
     }
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).expect("openpty");
+    let pty = openpty_cloexec(Some(&ws));
     let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
     let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -175,9 +185,14 @@ fn a_c_locale_copy_emits_nothing_outside_ascii() {
         .spawn()
         .expect("spawn cprog");
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let out = drain_to_eof(&mut File::from(pty.master));
-    assert!(child.wait().expect("wait cprog").success());
+    let status = child.wait().expect("wait cprog");
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
+    assert!(status.success());
 
     // The footer really did engage — otherwise this would pass by drawing nothing at all. The
     // summary is gated on that, and `[ok]` is the ASCII marker, so it proves both at once.
@@ -202,7 +217,7 @@ fn the_version_notice_is_ascii_on_a_c_locale_terminal() {
     // footer, so nothing else on this path consults Style at all. The separator was an em dash
     // unconditionally, which a C-locale terminal shows as three replacement characters.
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -219,9 +234,14 @@ fn the_version_notice_is_ascii_on_a_c_locale_terminal() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let out = drain_to_eof(&mut File::from(pty.master));
-    assert_eq!(child.wait().unwrap().code(), Some(0));
+    let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
+    assert_eq!(status.code(), Some(0));
 
     let text = String::from_utf8_lossy(&out);
     let line = text
@@ -246,7 +266,7 @@ fn preserve_all_still_gets_the_managed_tui() {
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).expect("openpty");
+    let pty = openpty_cloexec(Some(&ws));
     let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
     let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -266,6 +286,8 @@ fn preserve_all_still_gets_the_managed_tui() {
         .spawn()
         .expect("spawn cprog");
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -277,6 +299,8 @@ fn preserve_all_still_gets_the_managed_tui() {
         }
     }
     let status = child.wait().expect("wait cprog");
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert!(status.success(), "cprog exited non-zero");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024, "copy completed");
@@ -307,7 +331,7 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
     let bad_dst = tmp.0.join("no-such-dir").join("dst.bin"); // parent dir does not exist
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -323,6 +347,8 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -334,6 +360,8 @@ fn managed_relays_cp_error_and_preserves_exit_code() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert_eq!(status.code(), Some(1), "cprog returns cp's exit code");
     let text = String::from_utf8_lossy(&out);
@@ -354,7 +382,7 @@ fn help_over_pty_passes_through_but_names_cprog() {
     // It does append one line naming itself, because `--version`/`--help` reach `cp` untouched
     // and would otherwise leave no trace of the wrapper at all (#15).
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -369,6 +397,8 @@ fn help_over_pty_passes_through_but_names_cprog() {
         .spawn()
         .unwrap();
     drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -380,6 +410,8 @@ fn help_over_pty_passes_through_but_names_cprog() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
     let text = String::from_utf8_lossy(&out);
 
     assert_eq!(status.code(), Some(0));

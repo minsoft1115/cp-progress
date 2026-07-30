@@ -20,12 +20,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::{read_retry, strip_sgr, TmpDir};
+use common::{open_fifo_writer, openpty_cloexec, read_retry, strip_sgr, TmpDir};
 
 /// Visible widths of the footer redraws (each `\r`-delimited segment containing a `%`) in `data`.
 fn footer_widths(data: &[u8]) -> Vec<usize> {
@@ -45,7 +45,7 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -74,9 +74,10 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     let feeder = {
         let (fifo, stop) = (fifo.clone(), Arc::clone(&stop_feed));
         std::thread::spawn(move || {
-            // Blocks until cp opens the read end. Rust ignores SIGPIPE, so a closed reader
-            // surfaces as a write error rather than killing the test.
-            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            // Waits, with a deadline, until cp opens the read end: an open that could block
+            // forever would take this thread's join — and so the test — down with it (#69).
+            // Rust ignores SIGPIPE, so a closed reader surfaces as a write error, not a kill.
+            let Some(mut w) = open_fifo_writer(&fifo) else { return };
             let chunk = vec![0u8; 64 * 1024];
             while !stop.load(Ordering::Relaxed) {
                 if w.write_all(&chunk).is_err() {
@@ -177,7 +178,7 @@ fn an_unsized_terminal_is_laid_out_as_eighty_columns() {
             ws_xpixel: 0,
             ws_ypixel: 0,
         });
-        let pty = openpty(ws.as_ref(), None).expect("openpty");
+        let pty = openpty_cloexec(ws.as_ref());
         let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
         let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -245,7 +246,7 @@ fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -287,7 +288,7 @@ fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {
     let feeder = {
         let (fifo, stop) = (fifo.clone(), Arc::clone(&stop_feed));
         std::thread::spawn(move || {
-            let Ok(mut w) = std::fs::OpenOptions::new().write(true).open(&fifo) else { return };
+            let Some(mut w) = open_fifo_writer(&fifo) else { return };
             let chunk = vec![0u8; 64 * 1024];
             while !stop.load(Ordering::Relaxed) {
                 if w.write_all(&chunk).is_err() {

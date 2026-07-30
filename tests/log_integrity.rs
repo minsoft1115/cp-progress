@@ -20,9 +20,8 @@
 
 mod common;
 
-use common::{render_screen, Feeder, TmpDir};
-use nix::pty::openpty;
-use nix::sys::termios::Termios;
+use common::{openpty_cloexec, render_screen, Feeder, TmpDir, Watchdog};
+
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
@@ -44,7 +43,7 @@ fn cp_error_during_a_slow_copy_stays_readable_on_screen() {
     assert_eq!(unsafe { libc::mkfifo(cfifo.as_ptr(), 0o600) }, 0, "mkfifo");
     let _feeder = Feeder::start(fifo.clone());
 
-    let pty = openpty(Some(&winsize(24, 80)), None::<&Termios>).unwrap();
+    let pty = openpty_cloexec(Some(&winsize(24, 80)));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -77,6 +76,9 @@ fn cp_error_during_a_slow_copy_stays_readable_on_screen() {
     drop(cmd);
     drop(pty.slave);
 
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
+
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
@@ -87,6 +89,8 @@ fn cp_error_during_a_slow_copy_stays_readable_on_screen() {
         }
     }
     let status = child.wait().unwrap();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
 
     assert_eq!(status.code(), Some(1), "cp's exit code is preserved");
 

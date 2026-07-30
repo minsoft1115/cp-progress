@@ -10,12 +10,12 @@ use std::os::fd::OwnedFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
 
-use nix::pty::{openpty, Winsize};
+use nix::pty::Winsize;
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::{read_retry, rfind, TmpDir, Watchdog};
+use common::{open_fifo_writer, openpty_cloexec, read_retry, rfind, TmpDir, Watchdog};
 
 #[test]
 fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
@@ -25,7 +25,7 @@ fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -101,7 +101,7 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -127,7 +127,7 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
     let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
     // Open the write end so cp's open(FIFO) unblocks; send no data so cp blocks on read.
-    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let _writer = open_fifo_writer(&fifo).expect("cp never opened the FIFO to read");
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -169,7 +169,7 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -194,7 +194,7 @@ fn signal_to_cprog_alone_is_forwarded_to_cp_and_re_raised() {
     // A hang here is a teardown deadlock, which is the bug this test exists for.
     let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
-    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let _writer = open_fifo_writer(&fifo).expect("cp never opened the FIFO to read");
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
@@ -257,7 +257,7 @@ fn cp_killed_by_a_realtime_signal_still_exits_cprog_signaled() {
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -334,7 +334,7 @@ fn killing_cprog_outright_takes_cp_with_it() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -353,8 +353,14 @@ fn killing_cprog_outright_takes_cp_with_it() {
     drop(pty.slave);
     let cprog_pid = child.id() as i32;
 
+    // The one signals test that had no watchdog. Its own SIGKILL makes `child.wait()` look
+    // unconditional, but that only holds once cprog is *running*: reach this test with a managed
+    // launch that never spawns cp and every wait below is waiting on something that will not
+    // happen. 20 s covers the two 5 s polls plus the copy's start (#69).
+    let dog = Watchdog::arm(cprog_pid, 20);
+
     // Open the write end so cp gets past open() and blocks on read with nothing coming.
-    let writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let writer = open_fifo_writer(&fifo).expect("cp never opened the FIFO to read");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let mut cp_pid = None;
@@ -366,6 +372,8 @@ fn killing_cprog_outright_takes_cp_with_it() {
 
     kill(Pid::from_raw(cprog_pid), Signal::SIGKILL).unwrap();
     let _ = child.wait();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog hung: the watchdog had to kill it");
 
     // cp is not our child, so poll /proc rather than wait for it.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -398,7 +406,7 @@ fn a_signal_cprog_does_not_register_keeps_its_default_action() {
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -484,7 +492,7 @@ fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
 
     let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let pty = openpty(Some(&ws), None).unwrap();
+    let pty = openpty_cloexec(Some(&ws));
     let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
     let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
@@ -509,7 +517,7 @@ fn a_stopped_cp_is_continued_so_the_forwarded_signal_can_land() {
     // A hang here means the stopped cp was never continued — the bug this test exists for.
     let dog = Watchdog::arm(cprog_pid.as_raw(), 8);
 
-    let _writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+    let _writer = open_fifo_writer(&fifo).expect("cp never opened the FIFO to read");
 
     let mut master = File::from(pty.master);
     let mut out = Vec::new();
