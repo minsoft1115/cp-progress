@@ -477,6 +477,98 @@ mod tests {
         );
     }
 
+    /// The fd table for a decoy write fd plus a `/dst/<tag>.iso` destination and its source.
+    fn decoy_and(tag: &str) -> Vec<FdEntry> {
+        vec![
+            write_fd(3, "/tmp/decoy.log"),
+            read_fd(4, &format!("/src/{tag}.iso")),
+            write_fd(5, &format!("/dst/{tag}.iso")),
+        ]
+    }
+
+    #[test]
+    fn a_single_candidate_phase_forgets_the_sizes_it_passed_through() {
+        // Both `clear()` calls on `candidate_sizes` — this one on the single-candidate fast path,
+        // the Idle one in the sibling below — were unpinned (#69, exceptions E23). Dropping either
+        // is *observable*, not merely untidy: a size remembered from before the phase gets
+        // compared against a size measured after it, so a decoy that was written to in the
+        // meantime scores as the biggest gainer and steals the bar from the real copy.
+        let proc = FakeProc::new(decoy_and("a"));
+        let stat = FakeStat::default();
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+
+        // Phase 1, several candidates: the decoy's 40 bytes enter the size history.
+        assert_eq!(s.tick(t0), Tick::Skip);
+        stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
+        assert_eq!(s.tick(t0 + Duration::from_millis(50)).sample().unwrap().name, "/dst/a.iso");
+
+        // Phase 2, exactly one candidate: taken as-is by the fast path, which drops the history.
+        stat.set("/src/b.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/b.iso", Ok(FileStat { size: 100 }));
+        proc.set(file("/dst/b.iso", Some("/src/b.iso")));
+        assert_eq!(s.tick(t0 + Duration::from_millis(100)).sample().unwrap().name, "/dst/b.iso");
+
+        // Phase 3, several candidates again — and the decoy grew while we were not comparing.
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 500 }));
+        stat.set("/src/c.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/c.iso", Ok(FileStat { size: 100 }));
+        proc.set(decoy_and("c"));
+        // A cleared history means this phase starts blank: nothing has grown yet, so the sampler
+        // refuses to guess. Keeping the stale 40 would score the decoy at +460 — the biggest
+        // gainer by a wide margin — and publish `/tmp/decoy.log` as the file being copied.
+        assert_eq!(
+            s.tick(t0 + Duration::from_millis(150)),
+            Tick::Skip,
+            "a fresh candidate phase has no history to compare against"
+        );
+
+        // And the real destination wins as soon as there is something to compare.
+        stat.set("/dst/c.iso", Ok(FileStat { size: 200 }));
+        let st = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
+        assert_eq!(st.name, "/dst/c.iso", "the growing file is the destination, not the decoy");
+    }
+
+    #[test]
+    fn an_idle_phase_forgets_the_sizes_it_passed_through() {
+        // The Idle path's `clear()`, same rule and same harm as the sibling above (#69,
+        // exceptions E23). Idle is the gap between two files, so the sizes either side of it
+        // belong to different copies and must never be subtracted from one another.
+        let proc = FakeProc::new(decoy_and("a"));
+        let stat = FakeStat::default();
+        stat.set("/src/a.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 40 }));
+        stat.set("/dst/a.iso", Ok(FileStat { size: 100 }));
+        let mut s = Sampler::new(&proc, &stat, 42, WINDOW);
+        let t0 = Instant::now();
+
+        assert_eq!(s.tick(t0), Tick::Skip);
+        stat.set("/dst/a.iso", Ok(FileStat { size: 400 }));
+        assert_eq!(s.tick(t0 + Duration::from_millis(50)).sample().unwrap().name, "/dst/a.iso");
+
+        // Phase 2: cp closed the destination and no write fd is left, so nothing is being copied.
+        proc.set(vec![read_fd(4, "/src/a.iso")]);
+        assert_eq!(s.tick(t0 + Duration::from_millis(100)), Tick::Idle);
+
+        // Phase 3: a new file, and the decoy grew during the gap.
+        stat.set("/tmp/decoy.log", Ok(FileStat { size: 500 }));
+        stat.set("/src/c.iso", Ok(FileStat { size: 1000 }));
+        stat.set("/dst/c.iso", Ok(FileStat { size: 100 }));
+        proc.set(decoy_and("c"));
+        assert_eq!(
+            s.tick(t0 + Duration::from_millis(150)),
+            Tick::Skip,
+            "the sizes from before the Idle gap must not be carried across it"
+        );
+
+        stat.set("/dst/c.iso", Ok(FileStat { size: 200 }));
+        let st = s.tick(t0 + Duration::from_millis(200)).sample().unwrap();
+        assert_eq!(st.name, "/dst/c.iso", "the growing file is the destination, not the decoy");
+    }
+
     #[test]
     fn the_biggest_gainer_wins_even_when_it_is_the_inherited_fd() {
         // The mechanism is symmetric, and that is the point: the rule is "the growing file", not

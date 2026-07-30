@@ -225,6 +225,31 @@ mod tests {
         }
     }
 
+    /// A writer that accepts `n` writes and then fails every one after that.
+    ///
+    /// [`FailWriter`] cannot reach the erase-on-drop path at all: it fails on the very first
+    /// write, which is `HIDE_CURSOR`, so `draw` returns before `shown_rows` is ever set and the
+    /// `erase()` in `Drop` takes its `rows == 0` early return — a no-op that panics over nothing.
+    /// Letting the draw succeed first is what puts a footer on screen for the drop to erase (#69).
+    struct FailAfter(usize);
+    impl Write for FailAfter {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            match self.0 {
+                0 => Err(io::Error::other("io down")),
+                n => {
+                    self.0 = n - 1;
+                    Ok(b.len())
+                }
+            }
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            if self.0 == 0 {
+                return Err(io::Error::other("io down"));
+            }
+            Ok(())
+        }
+    }
+
     const ERASE: &[u8] = b"\r\x1b[K";
     const HIDE: &[u8] = b"\x1b[?25l";
     const SHOW: &[u8] = b"\x1b[?25h";
@@ -703,8 +728,32 @@ mod tests {
     #[test]
     fn io_failure_is_returned_and_drop_never_panics() {
         // docs/testing.md C6: render IO failures are best-effort; they must not panic.
+        //
+        // This half covers the failure that arrives *before* anything is on screen: the first
+        // write is `HIDE_CURSOR`, so `draw` gives up with `shown_rows` still 0. What `Drop` then
+        // has to survive is only the `SHOW_CURSOR` write, because `erase()` returns early on
+        // `rows == 0` and never touches the writer at all. The sibling below covers the other way.
         let mut g = FooterGuard::new(FailWriter);
         assert!(g.draw(&["F"]).is_err());
-        drop(g); // erase-on-drop over a failing writer must not panic
+        drop(g); // the cursor restore over a failing writer must not panic
+    }
+
+    #[test]
+    fn drop_never_panics_when_the_erase_itself_fails() {
+        // The other half, and the one that was uncovered (#69): a footer that *is* on screen when
+        // the writer dies. Replacing `let _ = self.erase()` in `Drop` with `.unwrap()` left the
+        // whole suite green, because no test had ever reached that call with `shown_rows > 0` —
+        // the sibling above cannot, and the comment claiming it did described a run that cannot
+        // happen.
+        //
+        // Five is the exact budget one `draw(&["F"])` needs, measured rather than counted: four
+        // writes (HIDE_CURSOR, then CR + row + ERASE_EOL for the single row) and a `flush` that
+        // requires the budget not to be spent yet. That leaves the erase to fail on its *second*
+        // write, so `Drop` has to survive an erase that already put bytes on the wire — and the
+        // cursor restore after it fails too.
+        let mut g = FooterGuard::new(FailAfter(5));
+        g.draw(&["F"]).expect("the draw must succeed, or this test is the sibling above again");
+        assert_eq!(g.shown_rows, 1, "a footer is on screen, so Drop's erase has work to do");
+        drop(g); // erase-on-drop over a writer that has since failed must not panic
     }
 }
