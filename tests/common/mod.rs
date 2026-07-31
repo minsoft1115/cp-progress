@@ -80,6 +80,61 @@ pub fn open_fifo_writer(fifo: &std::path::Path) -> Option<File> {
     }
 }
 
+thread_local! {
+    /// Per-test count of read errors [`read_retry`] and [`drain`] have turned into "end of
+    /// stream". Thread-local because libtest runs each test on its own thread, so one test's
+    /// broken channel cannot trip another's assertion.
+    static SILENT_READ_ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    /// Per-test count of times a [`read_retry`] loop was told the stream is over — an `Ok(0)` or
+    /// any error. Distinguishes "the channel ended and had nothing in it" from "the channel was
+    /// never consulted", which an empty buffer alone cannot.
+    static STREAM_ENDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a [`read_retry`] loop in this test ever reached the end of its stream.
+///
+/// **A test that concludes from an absence must assert this**, on top of [`silent_read_errors`].
+/// The two cover different halves: `silent_read_errors` catches a read that *failed*, this catches
+/// a read that never *happened*. Neither is implied by the other, and an empty buffer is the same
+/// value in all three cases. Measured: a `read_retry` that returns 0 without consulting the master
+/// leaves three absence-asserting tests green with only the error counter in place (#69).
+pub fn observed_stream_end() -> bool {
+    STREAM_ENDS.with(|c| c.get()) > 0
+}
+
+fn note_stream_end() {
+    STREAM_ENDS.with(|c| c.set(c.get() + 1));
+}
+
+fn note_silent_read_error(e: &std::io::Error) {
+    // EIO on a PTY master means the slave closed — the normal end of stream here, not a failure.
+    if e.raw_os_error() == Some(libc::EIO) {
+        return;
+    }
+    SILENT_READ_ERRORS.with(|c| c.set(c.get() + 1));
+}
+
+/// How many *unexpected* read errors this test's helpers have folded into "end of stream".
+///
+/// `EIO` is not counted: on a PTY master it is how the kernel reports that the slave side is fully
+/// closed, which is this suite's normal end of stream and the reason [`read_retry`] folds errors
+/// at all. Everything else — `EBADF`, `ENXIO`, a genuine I/O failure — is a channel that broke
+/// without saying so.
+///
+/// **Assert this is zero before concluding anything from an absence.** The positive guards these
+/// tests already carry — the destination's length, `copied > 0`, an exit status — prove the
+/// *scenario* ran; they say nothing about whether the PTY was ever readable. A test whose whole
+/// observation is that something is missing ("no bar", "no `ESC[K`", "nothing at all") has no
+/// content to guard on by construction, and is exactly the test that passes on a channel that
+/// died. Measured: making the helpers return nothing leaves four such tests green while the other
+/// 27 integration tests go red (#69, #61 D).
+pub fn silent_read_errors() -> usize {
+    SILENT_READ_ERRORS.with(|c| c.get())
+}
+
 /// Read one chunk from a PTY master, retrying on EINTR and treating EIO (the slave side fully
 /// closed) or any other error as end-of-stream. Returns 0 at EOF. This keeps the integration
 /// tests from mistaking a signal-interrupted read for the end of cprog's output.
@@ -88,13 +143,22 @@ pub fn open_fifo_writer(fifo: &std::path::Path) -> Option<File> {
 /// test that only asserts an absence ("no bar", "no `ESC[K`") would pass on a read that never
 /// happened. Every such test in this suite therefore carries a positive guard first — the
 /// destination's length, `copied > 0`, a substring that must be present — and that guard is not
-/// optional (#60).
+/// optional (#60). Where the absence *is* the whole observation and no content guard exists,
+/// assert [`silent_read_errors`] instead.
 pub fn read_retry(master: &mut File, buf: &mut [u8]) -> usize {
     loop {
         return match master.read(buf) {
+            Ok(0) => {
+                note_stream_end();
+                0
+            }
             Ok(n) => n,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(_) => 0,
+            Err(e) => {
+                note_silent_read_error(&e);
+                note_stream_end();
+                0
+            }
         };
     }
 }
@@ -164,7 +228,7 @@ pub fn readable(fd: RawFd, ms: i32) -> bool {
 ///
 /// Like [`read_retry`], a read error ends the drain silently rather than failing: the caller sees
 /// a short buffer, not an error. Callers must assert something *positive* before asserting an
-/// absence (#60).
+/// absence (#60), or [`silent_read_errors`] where there is nothing positive to assert.
 pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant, marker: Option<(usize, &[u8])>) {
     let mut buf = [0u8; 8192];
     while Instant::now() < deadline {
@@ -177,7 +241,10 @@ pub fn drain(master: &mut File, fd: RawFd, out: &mut Vec<u8>, deadline: Instant,
             match master.read(&mut buf) {
                 Ok(0) => return,
                 Ok(n) => out.extend_from_slice(&buf[..n]),
-                Err(_) => return,
+                Err(e) => {
+                    note_silent_read_error(&e);
+                    return;
+                }
             }
         }
     }

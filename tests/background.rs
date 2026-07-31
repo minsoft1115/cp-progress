@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use nix::sys::stat::Mode;
 
 mod common;
-use common::{contains, cprog_exec, drain, openpty_cloexec, Feeder, TmpDir, Watchdog};
+use common::{contains, cprog_exec, drain, openpty_cloexec, silent_read_errors, Feeder, TmpDir, Watchdog};
 
 #[test]
 fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
@@ -73,6 +73,11 @@ fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
     // Guard against a vacuous pass: the copy must actually have run in passthrough (dst grew).
     let copied = std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0);
     assert!(copied > 0, "cp did not copy anything; scenario not exercised");
+
+    // `copied > 0` proves the copy ran, not that the master was ever readable — and everything
+    // below is an absence, which an unread channel satisfies too. A `drain` that folds a read
+    // error into "nothing arrived" leaves this test green (measured with EBADF, #69).
+    assert_eq!(silent_read_errors(), 0, "the drain hit a read error, so `out` proves nothing");
 
     // The bug: a backgrounded cprog draws the managed footer + hides the cursor. After the fix it
     // must not — no DECTCEM hide (ESC[?25l) and no footer erase-to-EOL (ESC[K).
@@ -153,5 +158,30 @@ fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
         "no footer may be written into a pty master: {:?}",
         String::from_utf8_lossy(&seen[..seen.len().min(160)])
     );
+    // The guards above prove the *copy* ran; they say nothing about the slave ever being
+    // readable, and the assertion below is that nothing arrived — which a channel that never
+    // produced a byte satisfies just as well. Making `drain` return nothing leaves this test
+    // green while 27 other integration tests go red (measured, #69).
+    //
+    // `silent_read_errors` covers a read that failed; it cannot cover a slave that simply never
+    // became readable, because then `drain` never calls `read` at all. So prove the path
+    // end-to-end: a sentinel written into the master must come back on the slave, by the same
+    // master-to-slave delivery this test says a footer would have taken. It is read into its own
+    // buffer so `seen` stays untouched.
+    assert_eq!(silent_read_errors(), 0, "the drain hit a read error, so `seen` proves nothing");
+    {
+        use std::io::Write;
+        const SENTINEL: &[u8] = b"cprog-channel-probe\n";
+        let mut master = File::from(pty.master);
+        master.write_all(SENTINEL).expect("write the probe into the master");
+        let mut echoed = Vec::new();
+        drain(&mut slave, slave_fd, &mut echoed, Instant::now() + Duration::from_secs(5), Some((0, SENTINEL)));
+        assert!(
+            contains(&echoed, SENTINEL),
+            "the slave never delivered a byte written into the master, so `seen` being empty \
+             proves nothing about cprog: {:?}",
+            String::from_utf8_lossy(&echoed[..echoed.len().min(160)])
+        );
+    }
     assert!(seen.is_empty(), "passthrough with no -v emits nothing at all: {} bytes", seen.len());
 }
