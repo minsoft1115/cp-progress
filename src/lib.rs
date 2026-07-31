@@ -42,7 +42,7 @@ use std::ffi::OsString;
 use std::io::{self, BufWriter, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -189,7 +189,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
 
     let slow = Arc::new(Mutex::new(SlowTimer::new(threshold)));
     let progress: Arc<Mutex<Option<ProgressState>>> = Arc::new(Mutex::new(None));
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = Arc::new(Stopper::new());
     // Set by the render loop when we come back from a job-control stop, so the sampler drops the
     // timing history that spans the suspend instead of averaging it in as dead time (#9).
     let resumed = Arc::new(AtomicBool::new(false));
@@ -215,7 +215,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         thread::spawn(move || {
             let (proc_src, stat_src) = (LinuxProcSource, LinuxStatSource);
             let mut sampler = Sampler::new(&proc_src, &stat_src, pid, DEFAULT_RATE_WINDOW);
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.stopped() {
                 let now = Instant::now();
                 if resumed.swap(false, Ordering::Relaxed) {
                     // cp was stopped alongside us, so the span across the suspend measured no
@@ -234,7 +234,8 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 } else {
                     *lock_shared(&progress) = None;
                 }
-                thread::sleep(sample_interval);
+                // Interruptible: teardown wakes this instead of waiting it out (D9).
+                stop.wait(sample_interval);
             }
         })
     };
@@ -380,7 +381,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
             let _ = rustix::process::kill_process(target, rustix::process::Signal::CONT);
         }
     }
-    stop.store(true, Ordering::Relaxed);
+    stop.stop();
     let _ = stdout_reader.join();
     let _ = stderr_reader.join();
     let _ = sampler_thread.join();
@@ -416,6 +417,53 @@ fn footer_now(
 /// preserve its exit code (docs/architecture.md "에러 철학").
 pub(crate) fn lock_shared<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A stop flag whose waiters can be woken, so teardown never has to outlast a sleep.
+///
+/// The sampler spends nearly all of its life waiting between ticks. With a plain flag and
+/// `thread::sleep` the flag is only read at the top of the loop, so `join()` in teardown waits out
+/// whatever sleep is in flight — **every managed copy outlives `cp` by up to one sampling
+/// period**. At the 100 ms default that is invisible enough to have gone unnoticed, and it is
+/// still the dominant term in the wall-clock overhead of a small copy (docs/performance.md,
+/// docs/process-model.md "샘플링과 종료").
+///
+/// A condvar costs nothing while idle — no periodic wakeups to poll a flag with, which would show
+/// up as exactly the per-tick cost this crate measures.
+pub(crate) struct Stopper {
+    stopped: Mutex<bool>,
+    woken: Condvar,
+}
+
+impl Stopper {
+    pub(crate) fn new() -> Self {
+        Stopper { stopped: Mutex::new(false), woken: Condvar::new() }
+    }
+
+    /// Whether [`stop`](Self::stop) has been called.
+    pub(crate) fn stopped(&self) -> bool {
+        *lock_shared(&self.stopped)
+    }
+
+    /// Set the flag and wake every waiter. Idempotent.
+    pub(crate) fn stop(&self) {
+        *lock_shared(&self.stopped) = true;
+        self.woken.notify_all();
+    }
+
+    /// Wait up to `dur`, returning as soon as [`stop`](Self::stop) is called. Returns whether it
+    /// is stopped — so a caller that only ever loops can ignore it and re-check at the top.
+    ///
+    /// `wait_timeout_while` re-checks the predicate itself, so a spurious wakeup does not turn
+    /// into an early tick and skew the sampling interval.
+    pub(crate) fn wait(&self, dur: Duration) -> bool {
+        let guard = lock_shared(&self.stopped);
+        let (stopped, _) = self
+            .woken
+            .wait_timeout_while(guard, dur, |stopped| !*stopped)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *stopped
+    }
 }
 
 /// How many captured chunks may sit unrendered before the reader threads block, restoring the
@@ -507,6 +555,64 @@ mod shared_state {
         assert_eq!(*lock_shared(&m), 7, "the value is still there and still readable");
         *lock_shared(&m) = 9;
         assert_eq!(*lock_shared(&m), 9, "and still writable — the loop carries on");
+    }
+
+    // `Stopper` — the sampler's wait between ticks has to be interruptible, or teardown pays for
+    // it (D9, docs/process-model.md "샘플링과 종료"). Durations here are deliberately far apart:
+    // "woke early" is a 100x gap, not a millisecond of scheduler noise.
+    const NEVER: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_wait_on_a_stopped_stopper_returns_at_once() {
+        let s = Stopper::new();
+        s.stop();
+        assert!(s.stopped(), "the flag is set");
+        let t = Instant::now();
+        assert!(s.wait(NEVER), "wait reports that it is stopped");
+        assert!(t.elapsed() < Duration::from_millis(100), "and did not wait: {:?}", t.elapsed());
+    }
+
+    #[test]
+    fn stopping_wakes_a_thread_already_waiting() {
+        // The case that matters: the sampler is *already* asleep when teardown sets the flag.
+        // A plain flag plus `thread::sleep` cannot see it until the sleep ends.
+        let s = Arc::new(Stopper::new());
+        let waiter = {
+            let s = Arc::clone(&s);
+            thread::spawn(move || {
+                let t = Instant::now();
+                let stopped = s.wait(NEVER);
+                (stopped, t.elapsed())
+            })
+        };
+        // Give the waiter time to actually be inside `wait` before the notify.
+        thread::sleep(Duration::from_millis(50));
+        s.stop();
+        let (stopped, waited) = waiter.join().expect("waiter did not panic");
+        assert!(stopped, "the waiter saw the flag");
+        assert!(waited < Duration::from_secs(1), "it was woken, not timed out: {waited:?}");
+    }
+
+    #[test]
+    fn a_wait_that_is_never_stopped_times_out_and_says_so() {
+        // The ordinary path: no teardown, so the wait is the sampling interval and the loop
+        // carries on. If this returned `true` the sampler would stop after one tick.
+        let s = Stopper::new();
+        let t = Instant::now();
+        assert!(!s.wait(Duration::from_millis(60)), "not stopped, so it timed out");
+        assert!(t.elapsed() >= Duration::from_millis(50), "and really waited: {:?}", t.elapsed());
+        assert!(!s.stopped(), "a timeout does not set the flag");
+    }
+
+    #[test]
+    fn stopping_twice_is_harmless() {
+        // Teardown is not the only path that can reach `stop` — a panicking render loop unwinds
+        // through it too — so it must not care how often it is called.
+        let s = Stopper::new();
+        s.stop();
+        s.stop();
+        assert!(s.stopped());
+        assert!(s.wait(NEVER), "still stopped, still immediate");
     }
 }
 

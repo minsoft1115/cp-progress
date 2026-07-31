@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use nix::pty::Winsize;
 
 mod common;
-use common::{openpty_cloexec, read_retry, TmpDir, Watchdog};
+use common::{observed_stream_end, openpty_cloexec, read_retry, silent_read_errors, TmpDir, Watchdog};
 
 /// Locate a tool on the current PATH.
 fn find_on_path(tool: &str) -> PathBuf {
@@ -81,6 +81,10 @@ fn missing_stdbuf_falls_back_to_passthrough() {
     assert!(status.success(), "copy should still succeed");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 256 * 1024 * 1024);
     // Passthrough: no footer bar (█) and no summary (✓) — cprog emits nothing of its own.
+    // Passthrough without -v prints nothing, so there is no content guard to be had and the
+    // absence below rests entirely on the read having worked (#69).
+    assert_eq!(silent_read_errors(), 0, "a read error ended the loop, so `out` proves nothing");
+    assert!(observed_stream_end(), "the read loop never reached EOF, so `out` proves nothing");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]), "no bar in passthrough");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]), "no summary in passthrough");
 }
@@ -248,6 +252,10 @@ fn unreadable_path_entry_reads_as_stdbuf_missing() {
 
     assert!(status.success(), "the copy still succeeds via passthrough: {status:?}");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 200 * 1024 * 1024, "and really happened");
+    // Same as above: nothing is expected on screen, so the channel is the only thing that can
+    // be guarded (#69).
+    assert_eq!(silent_read_errors(), 0, "a read error ended the loop, so `out` proves nothing");
+    assert!(observed_stream_end(), "the read loop never reached EOF, so `out` proves nothing");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]), "no bar: the probe said no stdbuf");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]), "and no summary");
 }

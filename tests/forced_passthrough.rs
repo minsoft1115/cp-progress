@@ -14,7 +14,7 @@ use std::process::{Command, Stdio};
 use nix::pty::Winsize;
 
 mod common;
-use common::{contains, openpty_cloexec, read_retry, Watchdog};
+use common::{contains, observed_stream_end, openpty_cloexec, read_retry, silent_read_errors, Watchdog};
 use common::TmpDir;
 
 /// Read a PTY master to EOF.
@@ -76,6 +76,10 @@ fn forced_passthrough_disables_the_tui_even_on_a_pty() {
 
     assert!(status.success(), "the copy still succeeds");
     assert_eq!(std::fs::read(&dst).unwrap().len(), 64 * 1024 * 1024);
+    // Nothing positive to assert on `out` — forced passthrough with no -v is silent by
+    // design — so the channel itself is what has to be guarded (#69).
+    assert_eq!(silent_read_errors(), 0, "a read error ended the drain, so `out` proves nothing");
+    assert!(observed_stream_end(), "the read loop never reached EOF, so `out` proves nothing");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x96, 0x88]), "no footer bar");
     assert!(!out.windows(3).any(|w| w == [0xE2, 0x9C, 0x93]), "no summary");
     assert!(!contains(&out, b"\x1b[?25l"), "no cursor hide — no TUI at all");
