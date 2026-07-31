@@ -11,11 +11,12 @@
 use std::fs::File;
 use std::os::fd::OwnedFd;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use nix::pty::Winsize;
 
 mod common;
-use common::{openpty_cloexec, read_retry, TmpDir, Watchdog};
+use common::{observed_stream_end, openpty_cloexec, read_retry, silent_read_errors, TmpDir, Watchdog};
 
 #[test]
 fn managed_verbose_lines_interleave_with_footer_during_copy() {
@@ -423,5 +424,74 @@ fn help_over_pty_passes_through_but_names_cprog() {
     assert!(
         text.rfind(&line) > text.rfind("Usage: cp"),
         "the line comes after cp's output, not before it: {text:?}"
+    );
+}
+
+#[test]
+fn teardown_does_not_wait_out_the_sampler_interval() {
+    // A managed run must not outlive `cp` by a sampling period.
+    //
+    // The sampler loop reads the stop flag at the *top* and sleeps `CPROG_SAMPLE_INTERVAL_MS` at
+    // the bottom, so `sampler_thread.join()` in teardown waits out whatever sleep is in flight.
+    // That is dead time on every managed copy — invisible at the 100 ms default, which is why it
+    // sat unmeasured, and the dominant term in the wall-clock overhead of a small copy
+    // (docs/performance.md). Raising the interval turns the same bug into an obvious one: the
+    // copy below finishes in milliseconds, so anything near the interval is the join waiting.
+    const INTERVAL_MS: u64 = 3000;
+    const BUDGET: Duration = Duration::from_millis(1500);
+
+    let tmp = TmpDir::new("prompt_teardown");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 1024 * 1024]).unwrap();
+
+    let ws = Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let pty = openpty_cloexec(Some(&ws));
+    let slave_out: OwnedFd = pty.slave.try_clone().unwrap();
+    let slave_err: OwnedFd = pty.slave.try_clone().unwrap();
+
+    let started = Instant::now();
+    let mut child = {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_cprog"));
+        cmd.arg(&src)
+            .arg(&dst)
+            .env("TERM", "xterm")
+            .env("LC_ALL", "C.UTF-8")
+            .env_remove("CI")
+            .env("CPROG_SLOW_THRESHOLD_MS", "1")
+            .env("CPROG_SAMPLE_INTERVAL_MS", INTERVAL_MS.to_string())
+            .env("CPROG_RENDER_TICK_MS", "5")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(slave_out))
+            .stderr(Stdio::from(slave_err))
+            .spawn()
+            .expect("spawn cprog")
+    };
+    drop(pty.slave);
+    // EOF is this test's only exit; see `common::Watchdog` (#69).
+    let dog = Watchdog::arm(child.id() as i32, 30);
+
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
+        }
+    }
+    let status = child.wait().expect("wait cprog");
+    let elapsed = started.elapsed();
+    dog.disarm();
+    assert!(!dog.hung(), "cprog never exited, so the master never saw EOF");
+
+    assert!(status.success(), "the copy itself still succeeds: {status:?}");
+    assert_eq!(std::fs::read(&dst).unwrap().len(), 1024 * 1024, "and really happened");
+    assert_eq!(silent_read_errors(), 0, "a read error ended the loop, so the timing means nothing");
+    assert!(observed_stream_end(), "the read loop never reached EOF, so the timing means nothing");
+    assert!(
+        elapsed < BUDGET,
+        "cprog took {elapsed:?} for a 1 MiB copy with a {INTERVAL_MS} ms sampling interval — \
+         teardown is waiting out the sampler's sleep instead of interrupting it"
     );
 }

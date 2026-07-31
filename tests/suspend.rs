@@ -317,9 +317,17 @@ fn ctrl_z_during_teardown_still_stops_the_process() {
     // the process nor let it continue — a wedge. Restored, the kernel's default action applies
     // and the process really stops, which is what this test observes.
     //
-    // The teardown window is made wide on purpose: the sampler thread checks its stop flag
-    // between ticks, so a three-second sample interval makes its join take about that long. A
-    // FIFO with no data keeps cp deterministic (it blocks in `read`) exactly as in
+    // Hitting that window used to be easy for the wrong reason: the sampler slept between ticks
+    // and teardown waited the sleep out, so a three-second sampling interval bought a
+    // three-second window. D9 removed exactly that — teardown now wakes the sampler — and with it
+    // this test's `sleep(200ms)`, which then arrived after cprog had already exited
+    // (`Signaled(SIGTERM)`, measured). So the window is no longer bought, it is *synchronised on*:
+    // `FooterGuard::Drop` shows the cursor as the render loop ends, one statement before
+    // `restore_default_suspend`, so the first `ESC[?25h` on the master is the edge we need. From
+    // there SIGTSTP is repeated until the process stops — one sent a hair too early only sets a
+    // flag nobody reads, which is harmless, and the next one lands.
+    //
+    // A FIFO with no data keeps cp deterministic (it blocks in `read`) exactly as in
     // `tests/signals.rs`.
     use nix::sys::signal::{kill, Signal};
     use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
@@ -345,7 +353,7 @@ fn ctrl_z_during_teardown_still_stops_the_process() {
         .env_remove("CI")
         .env("CPROG_SLOW_THRESHOLD_MS", "1")
         .env("CPROG_RENDER_TICK_MS", "5")
-        .env("CPROG_SAMPLE_INTERVAL_MS", "3000") // widen the sampler join = the teardown window
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
         .process_group(0) // signal cprog alone
         .stdin(Stdio::null())
         .stdout(Stdio::from(out_fd))
@@ -364,21 +372,30 @@ fn ctrl_z_during_teardown_still_stops_the_process() {
     drain(&mut master, fd, &mut out, Instant::now() + Duration::from_millis(3000), Some((0, b"\x1b[?25l")));
     assert!(contains(&out, b"\x1b[?25l"), "footer never engaged; scenario not exercised");
 
-    // End the render loop, then arrive with Ctrl-Z while it is tearing down.
+    // End the render loop, then wait for the edge that says it is gone.
     kill(pid, Signal::SIGTERM).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    kill(pid, Signal::SIGTSTP).unwrap();
+    let before = out.len();
+    drain(&mut master, fd, &mut out, Instant::now() + Duration::from_millis(3000), Some((before, b"\x1b[?25h")));
+    assert!(
+        contains(&out[before..], b"\x1b[?25h"),
+        "the render loop never tore down, so this never reached the window it is about"
+    );
 
+    // Now inside teardown. Repeat until it stops: a SIGTSTP that beats
+    // `restore_default_suspend` by a few instructions is swallowed by the flag handler, and the
+    // next one lands. If the restore were missing, *every* one would be swallowed and this loop
+    // would run out having watched cprog exit instead — which is the wedge the rule prevents.
     let deadline = Instant::now() + Duration::from_millis(2000);
     let mut stopped = false;
     while Instant::now() < deadline {
+        let _ = kill(pid, Signal::SIGTSTP);
         match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)) {
             Ok(WaitStatus::Stopped(_, sig)) => {
                 assert_eq!(sig, Signal::SIGTSTP, "stopped by the signal we sent");
                 stopped = true;
                 break;
             }
-            Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(20)),
+            Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(1)),
             other => panic!("cprog left teardown without stopping: {other:?}"),
         }
     }

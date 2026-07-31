@@ -172,6 +172,7 @@
 | D8 | `--help`/`--version` | passthrough + TTY일 때만 cprog 버전 한 줄(stderr) | 유닛(`version_notice`) + 통합(PTY/비-TTY 양쪽) |
 | D6 | `cp` 정상 exit code n | 그대로 n 반환 | 유닛 + 통합 |
 | D7 | `stdbuf`가 `cp`를 exec | PID 안정 → `/proc/<pid>/fd` 유효 | 통합(간접 — managed 테스트에서 footer가 뜨는 것 자체가 증거) |
+| D9 | teardown이 샘플러 틱 사이에 걸림 | 대기를 깨워 **즉시** join — `cp`보다 한 샘플 주기를 더 살지 않는다 | 유닛(`lib.rs::Stopper`) + 통합(`tests/managed.rs::teardown_does_not_wait_out_the_sampler_interval` — 주기를 3s로 키워 재는 지연 측정) |
 
 ## E. passthrough 순수성
 
