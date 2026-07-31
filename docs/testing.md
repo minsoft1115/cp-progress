@@ -158,6 +158,7 @@
 | C6 | 렌더/IO 실패 | exit code 안 바뀜(best-effort) | 유닛 + 통합 |
 | C7 | 렌더 중 panic | `FooterGuard::Drop`이 화면 정리 | 유닛(catch_unwind) |
 | C8 | 로그 바이트 도착 | footer 지운 뒤 로그 쓰고 다시 그림 | 유닛 |
+| C10 | **필드 값이 자릿수·단위를 바꿈** | percent·size·rate가 고정폭이라 eta가 좌우로 안 밀린다(ui.md 불변식 8). 폭을 넘는 값은 자르지 않고 넘친다 | 유닛 — 포매터별(`ui.rs::rate_field_is_constant_width`, `the_size_field_is_constant_width_while_the_total_holds`, `a_rate_too_wide_for_the_field_overflows_rather_than_truncating`) + 합성 결과(`eta_stays_in_one_column_as_the_numbers_change`가 80칸 footer에서 eta의 시작 열을 직접 잰다) |
 | C9 | **footer가 터미널 최하단 행에 있음** | 2행 사이의 `\n`이 화면을 스크롤시킨다. 그래도 다음 erase는 정확히 한 줄만 되감아야 하고(안 그러면 이후 모든 쓰기가 한 줄씩 밀려 로그가 잡아먹힌다), tick 재그리기는 **스크롤을 일으키지 않아야** 한다 | 유닛 — 무한 버퍼가 아니라 **높이가 유한하고 스크롤하는 화면 모델**(`render.rs::Screen`)에 대고 검증. 로그 줄이 스크롤백+화면 통틀어 정확히 한 번씩만 나타나는지 확인 (#35) |
 
 ## D. `cp` 결과 / 종료
