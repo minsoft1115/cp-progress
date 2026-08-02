@@ -318,6 +318,13 @@ fn format_percent(pct: Option<f64>) -> String {
     format!("{num:>6} %")
 }
 
+/// Display width the rate field is padded to, so the eta after it does not move as the
+/// throughput changes units or digit counts (docs/ui.md invariant 8).
+///
+/// Sized for the widest ordinary reading, `1023 KiB/s`. A figure past that is not truncated —
+/// see [`format_rate`].
+const RATE_WIDTH: usize = 10;
+
 /// Binary size units.
 const SIZE_UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
@@ -338,15 +345,23 @@ fn scale_unit(bytes: u64) -> (f64, usize) {
 
 /// Format copied/total sizes in a unit chosen by the total's magnitude, e.g. `36.2/40.0 GiB`
 /// (byte scale shows integers). When the total is unknown, just the copied size (`36.2 GiB`).
+///
+/// The copied side is padded to the width of the total so the field does not change width as the
+/// copy advances (docs/ui.md invariant 8). With no total there is nothing to pad against and the
+/// field does grow — that path also has no rate and no eta to push around.
 fn format_size(done: u64, total: Option<u64>) -> String {
     match total {
         Some(t) => {
             let (div, u) = scale_unit(t);
-            if u == 0 {
-                format!("{done}/{t} {}", SIZE_UNITS[u])
+            let (d, tot) = if u == 0 {
+                (done.to_string(), t.to_string())
             } else {
-                format!("{:.1}/{:.1} {}", done as f64 / div, t as f64 / div, SIZE_UNITS[u])
-            }
+                (format!("{:.1}", done as f64 / div), format!("{:.1}", t as f64 / div))
+            };
+            // `total` is fixed for the length of a file, so padding `done` to its width makes the
+            // whole field constant for as long as the eta after it is worth watching. `done` past
+            // `total` (a sparse destination, exceptions E4) simply does not get padded.
+            format!("{d:>w$}/{tot} {}", SIZE_UNITS[u], w = tot.chars().count())
         }
         None => {
             let (div, u) = scale_unit(done);
@@ -359,11 +374,12 @@ fn format_size(done: u64, total: Option<u64>) -> String {
     }
 }
 
-/// Format a throughput in bytes/sec with a binary unit, or `-- MiB/s` when unknown. Saturates at
-/// the last unit for the same reason [`scale_unit`] does (exceptions F18).
+/// Format a throughput in bytes/sec with a binary unit, or `-- MiB/s` when unknown, right-aligned
+/// to [`RATE_WIDTH`] so the eta after it does not move (docs/ui.md invariant 8). Saturates at the
+/// last unit for the same reason [`scale_unit`] does (exceptions F18).
 fn format_rate(rate: Option<f64>) -> String {
     let Some(r) = rate.filter(|r| *r >= 0.0) else {
-        return "-- MiB/s".to_string();
+        return pad_rate("-- MiB/s");
     };
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = r;
@@ -372,7 +388,7 @@ fn format_rate(rate: Option<f64>) -> String {
         v /= 1024.0;
         u += 1;
     }
-    if u == 0 {
+    let text = if u == 0 {
         format!("{} {}/s", v.round() as u64, UNITS[u])
     } else if (v * 10.0).round() < 100.0 {
         // Shown value stays below 10 -> one decimal (e.g. "1.5", "9.9"). The check is on the
@@ -380,7 +396,15 @@ fn format_rate(rate: Option<f64>) -> String {
         format!("{v:.1} {}/s", UNITS[u])
     } else {
         format!("{} {}/s", v.round() as u64, UNITS[u])
-    }
+    };
+    pad_rate(&text)
+}
+
+/// Right-align a rate to [`RATE_WIDTH`]. Pads only — a figure wider than the field keeps every
+/// digit and overflows it, because a truncated throughput would be a wrong number rather than a
+/// shifted one.
+fn pad_rate(text: &str) -> String {
+    format!("{text:>w$}", w = RATE_WIDTH)
 }
 
 /// Format a remaining time as `MM:SS` (or `H:MM:SS` from one hour on — 3600 s reads `1:00:00`,
@@ -570,21 +594,25 @@ mod tests {
         // the unit index walking off the table — which would be an out-of-bounds panic, and a
         // panic is exit 101 over cp's own status. A petabyte is not exotic: `truncate -s 1P`
         // makes one instantly and cprog measures the logical length (exceptions E4).
-        assert_eq!(format_size(0, Some(1 << 50)), "0.0/1024.0 TiB", "1 PiB total");
-        assert_eq!(format_size(1 << 50, Some(1 << 51)), "1024.0/2048.0 TiB");
+        // `done` is padded to the total's width, so the short side carries leading spaces.
+        assert_eq!(format_size(0, Some(1 << 50)), "   0.0/1024.0 TiB", "1 PiB total");
+        assert_eq!(format_size(1 << 50, Some(1 << 51)), "1024.0/2048.0 TiB", "equal widths, no pad");
         assert_eq!(format_size(1 << 60, None), "1048576.0 TiB", "1 EiB copied");
         assert_eq!(format_size(u64::MAX, None), "16777216.0 TiB", "and the largest u64 there is");
     }
 
     #[test]
     fn rate_scales_units_and_unknown() {
-        assert_eq!(format_rate(Some(512.0)), "512 B/s");
-        assert_eq!(format_rate(Some(142.0 * 1024.0 * 1024.0)), "142 MiB/s");
-        assert_eq!(format_rate(Some(1536.0)), "1.5 KiB/s");
-        assert_eq!(format_rate(None), "-- MiB/s");
+        // Right-aligned to RATE_WIDTH, so the expected strings carry their leading padding —
+        // spelling it out here keeps the unit-and-decimal rules and the field width in one place,
+        // the way `percent_formats_two_decimals_right_aligned` already does (#69 C).
+        assert_eq!(format_rate(Some(512.0)), "   512 B/s");
+        assert_eq!(format_rate(Some(142.0 * 1024.0 * 1024.0)), " 142 MiB/s");
+        assert_eq!(format_rate(Some(1536.0)), " 1.5 KiB/s");
+        assert_eq!(format_rate(None), "  -- MiB/s");
         // No "10.0": values that display as 10+ use no decimal, consistently across the 10 line.
-        assert_eq!(format_rate(Some(9.95 * 1024.0 * 1024.0)), "10 MiB/s");
-        assert_eq!(format_rate(Some(9.4 * 1024.0 * 1024.0)), "9.4 MiB/s");
+        assert_eq!(format_rate(Some(9.95 * 1024.0 * 1024.0)), "  10 MiB/s");
+        assert_eq!(format_rate(Some(9.4 * 1024.0 * 1024.0)), " 9.4 MiB/s");
     }
 
     #[test]
@@ -598,6 +626,88 @@ mod tests {
         assert_eq!(format_rate(Some((1u64 << 40) as f64)), "1024 GiB/s", "1 TiB/s");
         assert_eq!(format_rate(Some((1u64 << 50) as f64)), "1048576 GiB/s", "1 PiB/s");
         assert!(format_rate(Some(f64::MAX)).ends_with(" GiB/s"), "no unit above GiB/s exists");
+    }
+
+    #[test]
+    fn rate_field_is_constant_width() {
+        // The complaint this fixes: `(83 MiB/s)` and `(1.2 GiB/s)` are different widths, so every
+        // rate change shoved the eta sideways. percent has been right-aligned for this reason
+        // since #20 (invariant 8); rate and size were the two fields that were not.
+        for r in [
+            format_rate(Some(512.0)),                       // "512 B/s"    — shortest unit
+            format_rate(Some(1536.0)),                      // "1.5 KiB/s"  — one decimal
+            format_rate(Some(142.0 * 1024.0 * 1024.0)),     // "142 MiB/s"
+            format_rate(Some(1023.0 * 1024.0)),             // "1023 KiB/s" — widest ordinary
+            format_rate(Some((1u64 << 40) as f64)),         // "1024 GiB/s" — the F18 example
+            format_rate(None),                              // "-- MiB/s"   — unknown
+        ] {
+            assert_eq!(r.width(), RATE_WIDTH, "the field is a constant {RATE_WIDTH} columns: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_rate_too_wide_for_the_field_overflows_rather_than_truncating() {
+        // Padding never cuts. A sparse copy can advance `done` by whole holes, so a single sample
+        // really can read in petabytes per second (exceptions F18/E4) — and a truncated figure
+        // would be a *wrong* number on screen, which is worse than a shifted eta.
+        let huge = format_rate(Some((1u64 << 50) as f64));
+        assert_eq!(huge, "1048576 GiB/s", "the value is intact");
+        assert!(huge.width() > RATE_WIDTH, "and it is allowed to exceed the field");
+    }
+
+    #[test]
+    fn the_size_field_is_constant_width_while_the_total_holds() {
+        // `total` does not change during a file, so padding `done` to the total's rendered width
+        // makes the whole field constant for as long as it matters. Across files it changes, and
+        // so does everything else on the row.
+        let total = Some(256 * GIB);
+        let widths: Vec<usize> = [0, GIB / 2, GIB, 12 * GIB, 123 * GIB, 256 * GIB]
+            .into_iter()
+            .map(|done| format_size(done, total).width())
+            .collect();
+        assert!(
+            widths.iter().all(|w| *w == widths[0]),
+            "one total, one width, whatever `done` is: {widths:?}"
+        );
+        // The byte scale has the same property with integers rather than decimals.
+        let bytes: Vec<usize> =
+            [0, 7, 99, 500].into_iter().map(|d| format_size(d, Some(500)).width()).collect();
+        assert!(bytes.iter().all(|w| *w == bytes[0]), "byte scale too: {bytes:?}");
+    }
+
+    #[test]
+    fn eta_stays_in_one_column_as_the_numbers_change() {
+        // The whole point, stated at the level the user sees. Same terminal, same file, only the
+        // progress and the throughput moving — the eta must not walk left and right.
+        let style = Style { color: false, unicode: true };
+        let size = TerminalSize { cols: 80, rows: 24 };
+        let eta_col = |done: u64, rate: f64| {
+            let st = ProgressState {
+                name: "big.iso".into(),
+                total: Some(256 * GIB),
+                done,
+                rate: Some(rate),
+                eta: Some(Duration::from_secs(3148)),
+            };
+            let line = render_footer(size, &st, style).expect("footer fits at 80 columns");
+            let at = line.find('\u{23f3}').unwrap_or_else(|| panic!("no eta in {line:?}"));
+            line[..at].width()
+        };
+        let mib = 1024.0 * 1024.0;
+        let cols: Vec<usize> = [
+            (GIB * 17 / 10, 83.0 * mib),      // "1.7/256.0 GiB  (83 MiB/s)"  — the reported case
+            (GIB * 17 / 10, 1.2 * 1024.0 * mib), // rate flips MiB -> GiB
+            (GIB * 17 / 10, 9.0 * mib),       // and back down to one digit
+            (12 * GIB, 83.0 * mib),           // done gains a digit
+            (123 * GIB, 83.0 * mib),          // and another
+        ]
+        .into_iter()
+        .map(|(d, r)| eta_col(d, r))
+        .collect();
+        assert!(
+            cols.iter().all(|c| *c == cols[0]),
+            "the eta starts in the same column every time: {cols:?}"
+        );
     }
 
     #[test]
@@ -782,18 +892,24 @@ mod tests {
     }
 
     #[test]
-    fn bar_width_is_stable_as_rate_text_changes() {
-        // The quantized bar must not jiggle when only the trailing rate field's width changes.
-        let bar_len = |rate: Option<f64>| {
-            let s = ProgressState { rate, ..state() };
+    fn bar_width_is_stable_as_the_eta_text_changes() {
+        // ui.md invariant 6: the quantised bar must not jiggle when a trailing field's text
+        // changes width. This was measured against `rate` until rate became a constant ten
+        // columns — at which point its three cases were one computation done three times and the
+        // test could not fail. Measured with `bar_cells` returning `available` unquantised: the
+        // rate version still passed, this one reports 33/31/30. A test that survives its own
+        // subject being broken is not coverage (#69).
+        let bar_len = |eta: Option<Duration>| {
+            let s = ProgressState { eta, ..state() };
             let line = render_footer(TerminalSize::new(80, 24), &s, Style::plain()).unwrap();
             line.chars().filter(|&c| c == '█' || c == '░').count()
         };
-        // "-- MiB/s" (8), "142 MiB/s" (9), "1.5 GiB/s" (9) — different rate widths, same bar.
+        // "⏳ --:--" (8), "⏳ 1:00:00" (10), "⏳ 10:00:00" (11) — eta is the one trailing field
+        // whose width still moves, so it is what this invariant has to be measured against.
         let a = bar_len(None);
-        let b = bar_len(Some(142.0 * 1024.0 * 1024.0));
-        let c = bar_len(Some(1.5 * 1024.0 * 1024.0 * 1024.0));
-        assert_eq!((a, b), (b, c), "bar cells stayed {a}/{b}/{c} across rate widths");
+        let b = bar_len(Some(Duration::from_secs(3600)));
+        let c = bar_len(Some(Duration::from_secs(36000)));
+        assert_eq!((a, b), (b, c), "bar cells stayed {a}/{b}/{c} across eta widths");
     }
 
     /// Strip ANSI CSI (SGR) sequences so the visible width can be measured.
