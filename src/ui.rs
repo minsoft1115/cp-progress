@@ -892,18 +892,24 @@ mod tests {
     }
 
     #[test]
-    fn bar_width_is_stable_as_rate_text_changes() {
-        // The quantized bar must not jiggle when only the trailing rate field's width changes.
-        let bar_len = |rate: Option<f64>| {
-            let s = ProgressState { rate, ..state() };
+    fn bar_width_is_stable_as_the_eta_text_changes() {
+        // ui.md invariant 6: the quantised bar must not jiggle when a trailing field's text
+        // changes width. This was measured against `rate` until rate became a constant ten
+        // columns — at which point its three cases were one computation done three times and the
+        // test could not fail. Measured with `bar_cells` returning `available` unquantised: the
+        // rate version still passed, this one reports 33/31/30. A test that survives its own
+        // subject being broken is not coverage (#69).
+        let bar_len = |eta: Option<Duration>| {
+            let s = ProgressState { eta, ..state() };
             let line = render_footer(TerminalSize::new(80, 24), &s, Style::plain()).unwrap();
             line.chars().filter(|&c| c == '█' || c == '░').count()
         };
-        // "-- MiB/s" (8), "142 MiB/s" (9), "1.5 GiB/s" (9) — different rate widths, same bar.
+        // "⏳ --:--" (8), "⏳ 1:00:00" (10), "⏳ 10:00:00" (11) — eta is the one trailing field
+        // whose width still moves, so it is what this invariant has to be measured against.
         let a = bar_len(None);
-        let b = bar_len(Some(142.0 * 1024.0 * 1024.0));
-        let c = bar_len(Some(1.5 * 1024.0 * 1024.0 * 1024.0));
-        assert_eq!((a, b), (b, c), "bar cells stayed {a}/{b}/{c} across rate widths");
+        let b = bar_len(Some(Duration::from_secs(3600)));
+        let c = bar_len(Some(Duration::from_secs(36000)));
+        assert_eq!((a, b), (b, c), "bar cells stayed {a}/{b}/{c} across eta widths");
     }
 
     /// Strip ANSI CSI (SGR) sequences so the visible width can be measured.
