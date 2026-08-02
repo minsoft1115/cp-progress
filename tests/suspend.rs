@@ -132,7 +132,23 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
             let apg = libc::getpgrp();
             let b = libc::fork();
             if b == 0 {
-                libc::setpgid(0, 0);
+                libc::setpgid(0, 0); // cprog = its OWN pgrp
+                // Do not exec until A has actually handed this group the terminal. cprog decides
+                // managed-vs-passthrough from `tcgetpgrp` at startup, so starting before A's
+                // `tcsetpgrp` below lands makes it a background job: it passes through and **no
+                // footer is ever drawn**. Phase 1 then burns its whole deadline instead of the
+                // ~25 ms it normally takes — which is exactly how this failed in CI, twice, on
+                // trees that changed teardown and field widths respectively (#73). Delaying that
+                // `tcsetpgrp` by 60 ms reproduces it on demand: `engaged=false` at 5.008 s.
+                //
+                // A longer deadline would not have helped; nothing was coming. All three calls
+                // here are async-signal-safe, as everything else on this path has to be.
+                let mut spins = 0;
+                while libc::tcgetpgrp(0) != libc::getpgrp() && spins < 5000 {
+                    let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+                    libc::nanosleep(&ts, std::ptr::null_mut());
+                    spins += 1;
+                }
                 libc::execvpe(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
@@ -234,7 +250,23 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
             let apg = libc::getpgrp();
             let b = libc::fork();
             if b == 0 {
-                libc::setpgid(0, 0);
+                libc::setpgid(0, 0); // cprog = its OWN pgrp
+                // Do not exec until A has actually handed this group the terminal. cprog decides
+                // managed-vs-passthrough from `tcgetpgrp` at startup, so starting before A's
+                // `tcsetpgrp` below lands makes it a background job: it passes through and **no
+                // footer is ever drawn**. Phase 1 then burns its whole deadline instead of the
+                // ~25 ms it normally takes — which is exactly how this failed in CI, twice, on
+                // trees that changed teardown and field widths respectively (#73). Delaying that
+                // `tcsetpgrp` by 60 ms reproduces it on demand: `engaged=false` at 5.008 s.
+                //
+                // A longer deadline would not have helped; nothing was coming. All three calls
+                // here are async-signal-safe, as everything else on this path has to be.
+                let mut spins = 0;
+                while libc::tcgetpgrp(0) != libc::getpgrp() && spins < 5000 {
+                    let ts = libc::timespec { tv_sec: 0, tv_nsec: 1_000_000 };
+                    libc::nanosleep(&ts, std::ptr::null_mut());
+                    spins += 1;
+                }
                 libc::execvpe(prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
                 libc::_exit(127);
             }
