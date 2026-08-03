@@ -4,16 +4,19 @@
 //! user did not pass `-v`; with `-v` the log line just above already says it, and the row
 //! stays blank as a separator (#20). Row two is the bar, composed left-to-right as
 //! `bar  percent  size  (rate)  eta`, e.g.
-//! `█████░░░░░  62.34 %  0.9/1.4 GiB  (1.8 GiB/s)  ⏳ 00:00`. Percent
-//! is two decimals, right-aligned to a fixed width so later fields never shift; size is the
-//! copied/total bytes in an adaptive unit; the rate is parenthesized as a qualifier. When the
-//! terminal is too narrow, fields are shed in priority order `eta -> rate -> size -> bar ->
-//! percent`; percent survives longest.
+//! `█████░░░░░  62.34 %  0.9/1.4 GiB  (1.8 GiB/s)  ⏳    00:00`. Percent
+//! is two decimals; size is the copied/total bytes in an adaptive unit; the rate is
+//! parenthesized as a qualifier. **All four are fixed widths** — right-aligned, and padded rather
+//! than truncated when a value overflows — so that no field shifts as the numbers change and the
+//! bar keeps the same columns to fill (docs/ui.md invariant 8). The one exception is a size with
+//! no known total, which has nothing to pad itself against. When the terminal is too narrow,
+//! fields are shed in priority order `eta -> rate -> size -> bar -> percent`; percent survives
+//! longest.
 //!
 //! The bar snaps to a quantized width (a divisor of 100: 10/20/50/100 cells) — the largest
 //! that fits. This keeps a clean percent-per-cell, scales resolution to the terminal, stops
-//! the bar from spanning the whole screen, and keeps it stable as the trailing rate/eta
-//! fields change width (docs/ui.md). Below 10 cells the bar is shed.
+//! the bar from spanning the whole screen, and absorbs what width changes are left — an
+//! overflowing value is the only one there is (docs/ui.md). Below 10 cells the bar is shed.
 //!
 //! Colour and glyphs follow [`Style`]: the bar fill is green when colour is enabled, and a
 //! non-UTF-8 terminal falls back to an ASCII bar (`[###---]`). Layout is always computed on
@@ -379,7 +382,7 @@ fn format_size(done: u64, total: Option<u64>) -> String {
 /// last unit for the same reason [`scale_unit`] does (exceptions F18).
 fn format_rate(rate: Option<f64>) -> String {
     let Some(r) = rate.filter(|r| *r >= 0.0) else {
-        return pad_rate("-- MiB/s");
+        return pad("-- MiB/s", RATE_WIDTH);
     };
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut v = r;
@@ -397,28 +400,42 @@ fn format_rate(rate: Option<f64>) -> String {
     } else {
         format!("{} {}/s", v.round() as u64, UNITS[u])
     };
-    pad_rate(&text)
+    pad(&text, RATE_WIDTH)
 }
 
-/// Right-align a rate to [`RATE_WIDTH`]. Pads only — a figure wider than the field keeps every
-/// digit and overflows it, because a truncated throughput would be a wrong number rather than a
-/// shifted one.
-fn pad_rate(text: &str) -> String {
-    format!("{text:>w$}", w = RATE_WIDTH)
+/// Right-align a field to `w` columns. Pads only — a figure wider than its field keeps every digit
+/// and overflows it, because a truncated number would be a *wrong* number rather than a shifted
+/// one, and the fields this pads are all measurements.
+fn pad(text: &str, w: usize) -> String {
+    format!("{text:>w$}")
 }
+
+/// Display width the eta field is padded to, so the bar in front of it does not change size as the
+/// remaining time crosses the hour (docs/ui.md invariant 8).
+///
+/// Sized for the widest ordinary reading, `HH:MM:SS`. A longer one is not truncated — see
+/// [`format_eta`].
+const ETA_WIDTH: usize = 8;
 
 /// Format a remaining time as `MM:SS` (or `H:MM:SS` from one hour on — 3600 s reads `1:00:00`,
-/// not `60:00`), or `--:--` when unknown.
+/// not `60:00`), or `--:--` when unknown, right-aligned to [`ETA_WIDTH`].
+///
+/// eta is the last field on the row, so nothing follows it to be pushed — but the *bar* takes
+/// whatever columns the fixed fields leave, so a shorter eta lengthens the bar and a longer one
+/// shortens it. Against the quantized bar widths that is not a shimmer of one column but a jump
+/// from 50 cells to 20 and back, every time a wandering rate carries the estimate over an hour
+/// (docs/ui.md invariant 8, #76).
 fn format_eta(eta: Option<Duration>) -> String {
     let Some(d) = eta else {
-        return "--:--".to_string();
+        return pad("--:--", ETA_WIDTH);
     };
     let secs = d.as_secs();
-    if secs < 3600 {
+    let text = if secs < 3600 {
         format!("{:02}:{:02}", secs / 60, secs % 60)
     } else {
         format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    }
+    };
+    pad(&text, ETA_WIDTH)
 }
 
 #[cfg(test)]
@@ -712,14 +729,55 @@ mod tests {
 
     #[test]
     fn eta_formats_mmss_hhmmss_and_unknown() {
-        assert_eq!(format_eta(Some(Duration::from_secs(5))), "00:05");
-        assert_eq!(format_eta(Some(Duration::from_secs(65))), "01:05");
-        assert_eq!(format_eta(Some(Duration::from_secs(3665))), "1:01:05");
-        assert_eq!(format_eta(None), "--:--");
+        // Right-aligned to ETA_WIDTH, so the expected strings carry their leading padding — the
+        // same spelling-it-out the percent and rate tests use, which keeps the format rules and
+        // the field width in one place (#69 C).
+        assert_eq!(format_eta(Some(Duration::from_secs(5))), "   00:05");
+        assert_eq!(format_eta(Some(Duration::from_secs(65))), "   01:05");
+        assert_eq!(format_eta(Some(Duration::from_secs(3665))), " 1:01:05");
+        assert_eq!(format_eta(None), "   --:--");
         // The hour boundary itself: 3600 s is the first value written as H:MM:SS, so it is
         // `1:00:00` and never `60:00` (docs/ui.md).
-        assert_eq!(format_eta(Some(Duration::from_secs(3599))), "59:59");
-        assert_eq!(format_eta(Some(Duration::from_secs(3600))), "1:00:00");
+        assert_eq!(format_eta(Some(Duration::from_secs(3599))), "   59:59");
+        assert_eq!(format_eta(Some(Duration::from_secs(3600))), " 1:00:00");
+        // Right-aligned rather than left, so the colons line up as the shape changes and the
+        // seconds stay in the same column.
+        assert_eq!(format_eta(Some(Duration::from_secs(36000))), "10:00:00");
+    }
+
+    #[test]
+    fn eta_field_is_constant_width() {
+        // The defect #76 reported: the bar takes whatever the fixed fields leave, so an eta that
+        // grows by two columns at the hour mark shortens the bar — and against the quantised
+        // widths that is a jump from 50 cells to 20. percent, size and rate were fixed for the
+        // field *after* them; eta is fixed for the bar *before* it (invariant 8).
+        for e in [
+            format_eta(None),                              // "--:--"    — unknown
+            format_eta(Some(Duration::ZERO)),              // "00:00"    — done
+            format_eta(Some(Duration::from_secs(59))),     // "00:59"
+            format_eta(Some(Duration::from_secs(3599))),   // "59:59"    — widest MM:SS
+            format_eta(Some(Duration::from_secs(3600))),   // "1:00:00"  — the hour boundary
+            format_eta(Some(Duration::from_secs(35999))),  // "9:59:59"
+            format_eta(Some(Duration::from_secs(36000))),  // "10:00:00" — widest ordinary
+            format_eta(Some(Duration::from_secs(359_999))),// "99:59:59"
+        ] {
+            assert_eq!(e.width(), ETA_WIDTH, "the field is a constant {ETA_WIDTH} columns: {e:?}");
+        }
+    }
+
+    #[test]
+    fn an_eta_too_wide_for_the_field_overflows_rather_than_truncating() {
+        // Same rule as the rate, for the same reason: padding never cuts, because a truncated
+        // figure is a wrong number rather than a shifted one — `10:00:00` cut to eight columns
+        // from the right would read as a copy that finishes within the hour.
+        //
+        // A hundred hours is reachable rather than theoretical. `eta` is `remaining / rate` with
+        // no clamp (`progress.rs::eta`), and a copy that has slowed to a crawl — a stalled network
+        // mount still moving a few bytes per second — produces exactly that on a large file. The
+        // rate has to be *positive*, not fast: at zero the eta goes unknown instead (A7).
+        let long = format_eta(Some(Duration::from_secs(100 * 3600)));
+        assert_eq!(long, "100:00:00", "every digit survives");
+        assert!(long.width() > ETA_WIDTH, "and it is allowed to exceed the field");
     }
 
     // ---- quantized bar width ---------------------------------------------------------
@@ -892,24 +950,86 @@ mod tests {
     }
 
     #[test]
-    fn bar_width_is_stable_as_the_eta_text_changes() {
-        // ui.md invariant 6: the quantised bar must not jiggle when a trailing field's text
-        // changes width. This was measured against `rate` until rate became a constant ten
-        // columns — at which point its three cases were one computation done three times and the
-        // test could not fail. Measured with `bar_cells` returning `available` unquantised: the
-        // rate version still passed, this one reports 33/31/30. A test that survives its own
-        // subject being broken is not coverage (#69).
-        let bar_len = |eta: Option<Duration>| {
+    fn the_bar_does_not_move_as_the_eta_crosses_the_hour() {
+        // The reported defect, at the level the user sees it: nothing about the terminal changes,
+        // the copy merely passes the one-hour mark, and the bar jumps between 50 cells and 20.
+        // Measured on the code before the fix (256 GiB at 99 MiB/s), the bar's width in cells:
+        //
+        // | cols | `MM:SS` | `H:MM:SS` | `HH:MM:SS` |
+        // |------|---------|-----------|------------|
+        // | 101  |   50    |    20     |     20     |
+        // | 102  |   50    |    20     |     20     |
+        // | 103  |   50    |    50     |     20     |
+        // | 104  |   50    |    50     |     50     |
+        //
+        // #74 fixed size and rate and left eta out, on the reasoning that eta is the last field so
+        // a change in its width has nothing to push. That reasoning was wrong: the bar takes
+        // whatever columns the fixed fields leave, so a shorter eta makes the *bar* longer, and at
+        // a quantum boundary the difference is a jump of thirty cells. A long copy's rate wanders
+        // either side of the hour mark, so the eta crosses back and forth for real.
+        let bar_len = |cols: u16, eta: Option<Duration>| {
             let s = ProgressState { eta, ..state() };
-            let line = render_footer(TerminalSize::new(80, 24), &s, Style::plain()).unwrap();
+            let line = render_footer(TerminalSize::new(cols, 24), &s, Style::plain()).unwrap();
             line.chars().filter(|&c| c == '█' || c == '░').count()
         };
-        // "⏳ --:--" (8), "⏳ 1:00:00" (10), "⏳ 10:00:00" (11) — eta is the one trailing field
-        // whose width still moves, so it is what this invariant has to be measured against.
-        let a = bar_len(None);
-        let b = bar_len(Some(Duration::from_secs(3600)));
-        let c = bar_len(Some(Duration::from_secs(36000)));
-        assert_eq!((a, b), (b, c), "bar cells stayed {a}/{b}/{c} across eta widths");
+        // Every eta shape there is, including the unknown one a stall produces.
+        let shapes = [
+            None,
+            Some(Duration::from_secs(20 * 60)),          // MM:SS
+            Some(Duration::from_secs(3600 + 20 * 60)),   // H:MM:SS
+            Some(Duration::from_secs(36000 + 20 * 60)),  // HH:MM:SS
+        ];
+        // Swept rather than spot-checked: the jump only shows within a few columns of a quantum
+        // boundary, and which columns those are moves with the rest of the row.
+        for cols in 8u16..=200 {
+            let cells: Vec<usize> = shapes.iter().map(|e| bar_len(cols, *e)).collect();
+            assert!(
+                cells.iter().all(|c| *c == cells[0]),
+                "cols {cols}: the bar moved with the eta text alone: {cells:?}"
+            );
+        }
+        assert!(bar_len(80, None) > 0, "and there is a bar to measure at an ordinary width");
+    }
+
+    #[test]
+    fn bar_width_is_stable_as_an_overflowing_rate_changes_width() {
+        // ui.md invariant 6: the quantised bar must not jiggle when a trailing field's text
+        // changes width. The measurement has had to move twice, because each fixed-width field
+        // takes a variable away: it was `rate` until #74 pinned rate to ten columns, then `eta`
+        // until #76 pinned eta to eight. What is left is the one case where a field is *allowed*
+        // to change width — a value too wide for its field, which is padded but never truncated,
+        // because a truncated measurement is a wrong number (F18/E4). A sparse copy really does
+        // report `1048576 GiB/s`, thirteen columns against the field's ten.
+        //
+        // Measured with `bar_cells` returning `available` unquantised, this reports 30/27 at 80
+        // columns and 40/37 at 90 — so the quantisation is doing the absorbing, not the layout.
+        let bar_len = |cols: u16, rate: f64| {
+            let s = ProgressState { rate: Some(rate), ..state() };
+            let line = render_footer(TerminalSize::new(cols, 24), &s, Style::plain()).unwrap();
+            line.chars().filter(|&c| c == '█' || c == '░').count()
+        };
+        let ordinary = 142.0 * 1024.0 * 1024.0; // " 142 MiB/s", the field's own width
+        let overflowing = (1u64 << 50) as f64; // "1048576 GiB/s", three columns past it
+        for cols in [80u16, 90] {
+            assert_eq!(
+                bar_len(cols, ordinary),
+                bar_len(cols, overflowing),
+                "cols {cols}: three columns of overflow moved the bar"
+            );
+        }
+        // **And the honest other half.** Quantisation absorbs a width change only while both
+        // readings land in the same quantum; within three columns of a boundary it does not, and
+        // there the bar really does jump. Swept across 8..=200 that is 18 widths of 193 — six
+        // windows of three, one per boundary the shedding ladder and the quanta put there. This is
+        // exactly why every ordinary value is fixed-width (invariant 8) rather than left for the
+        // quantisation to smooth over: quantisation makes the jump rare, not impossible. If this
+        // assertion starts failing, the ladder moved and the windows want re-measuring — it is not
+        // a promise that 70 in particular is special.
+        assert_ne!(
+            bar_len(70, ordinary),
+            bar_len(70, overflowing),
+            "70 columns sits on a quantum boundary, where the overflow is not absorbed"
+        );
     }
 
     /// Strip ANSI CSI (SGR) sequences so the visible width can be measured.

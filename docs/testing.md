@@ -26,9 +26,10 @@
 - **ui 레이아웃** — `(TerminalSize, ProgressState)`로 footer 문자열과 폭 축약 순서를 단언.
   in-memory writer(`Vec<u8>`)에 그려 escape 시퀀스를 바이트 단위로 검증.
 - **bar 양자화** — 바 폭이 `10/20/50/100` 중 들어가는 최대값으로 스냅되고(그 미만이면 바
-  생략), 뒤 필드 텍스트 폭이 바뀌어도 흔들리지 않음. **재는 대상은 eta다** — percent·size·rate는
-  고정폭이 됐으므로(ui.md 불변식 8) 폭이 변하는 뒤 필드는 eta뿐이고, rate는 필드를 넘칠 때만
-  변한다. rate로 재던 테스트는 그 변화가 사라지면서 공허해져 eta로 옮겼다.
+  생략), 뒤 필드 텍스트 폭이 바뀌어도 흔들리지 않음. **재는 대상은 필드를 넘치는 rate다**
+  — percent·size·rate·eta가 전부 고정폭이 됐으므로(ui.md 불변식 8) 폭이 변할 수 있는 건
+  필드를 넘치는 값뿐이다. 측정 대상은 rate → eta → 넘치는 rate로 두 번 옮겼고, 옮긴 이유는
+  매번 같다: **그 축을 고정폭으로 만들면 그것으로 재던 테스트가 공허해진다.**
 - **파일명 줄** — 제어문자 제거 → 표시폭 기준 앞자름 → `…`/`...` 폴백. 폭 경계값, CJK(2칸),
   개행이 든 경로, 이름이 폭보다 짧을 때(자르지 않음)까지 단언한다.
 - **footer 높이 2행** — `rows < 4`면 footer를 아예 그리지 않고, 지울 때 정확히 2행을 지운다.
@@ -152,7 +153,8 @@
 
 | # | 예외 | 기대 동작 | 방식 |
 |---|---|---|---|
-| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치 | 유닛(flag) + 통합 |
+| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치. 재배치는 스크롤 영역을 다시 걸고 **보이는 화면 전체를 지운다**(`ESC[2J`) — 리플로가 되돌려 놓은 옛 footer 조각은 로그 커서보다 **위**에 있을 수 있어 `ESC[J`로는 못 닿는다. 스크롤백은 안 지운다(`ESC[3J`가 아니다) | 유닛(flag) + 통합, 지우기는 `render.rs::re_arming_clears_the_rows_above_the_log_cursor_too`·`erasing_the_screen_does_not_touch_the_scrollback` |
+| C12 | **첫 arm은 화면을 지우면 안 된다** | 크기가 바뀌었을 때만 `ESC[2J`다. 첫 arm은 파일이 느린 것으로 판명된 순간, 즉 명령 실행 도중에 일어나므로 화면을 지우면 **셸 프롬프트와 사용자가 친 명령줄이 같이 날아간다.** 첫 arm은 로그 커서부터 아래로만 지운다(`ESC[J`) | 유닛 — `render.rs::the_first_arm_clears_from_the_log_cursor_and_never_the_screen`. Ctrl-Z 정지 중에 리사이즈한 경우도 재개 시 "리사이즈"로 쳐야 하므로(`last_armed_for`가 `release`보다 오래 산다) `a_resize_during_a_stop_is_still_a_resize_on_resume` |
 | C2 | SIGWINCH 유실/합쳐짐 | 폴백 주기로 재조회 | 유닛 |
 | C3 | 터미널이 footer보다 짧음(`height < min_log`) | footer 억제/최소, 로그 영역 보존 | 유닛(layout) |
 | C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여준다. 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
@@ -161,7 +163,7 @@
 | C7 | 렌더 중 panic | `FooterGuard::Drop`이 화면 정리 | 유닛(catch_unwind) |
 | C8 | ~~로그 바이트 도착~~ | **#76으로 규칙이 사라졌다.** footer가 스크롤 영역 밖에 있어 로그와 겹치지 않으므로 지우고 다시 그릴 일이 없다 | — |
 | C11 | **footer 위치가 커서에 의존하지 않는다** | 스크롤 영역 + 절대 좌표. 리사이즈가 이미 그려진 것을 재배치해도 위치가 안 어긋난다. **상단 마진은 1행 고정**(alacritty만이 그 조건에서 스크롤백을 만든다) | 유닛 — `render.rs::the_scroll_region_starts_at_row_one`, `the_footer_is_written_to_the_last_two_rows_by_absolute_position`, `drawing_the_footer_returns_the_cursor_to_the_log`, 모델 쪽 `the_model_feeds_scrollback_only_when_the_top_margin_is_row_one` |
-| C10 | **필드 값이 자릿수·단위를 바꿈** | percent·size·rate가 고정폭이라 eta가 좌우로 안 밀린다(ui.md 불변식 8). 폭을 넘는 값은 자르지 않고 넘친다 | 유닛 — 포매터별(`ui.rs::rate_field_is_constant_width`, `the_size_field_is_constant_width_while_the_total_holds`, `a_rate_too_wide_for_the_field_overflows_rather_than_truncating`) + 합성 결과(`eta_stays_in_one_column_as_the_numbers_change`가 80칸 footer에서 eta의 시작 열을 직접 잰다). 부작용으로 필드 등장 경계가 1칸씩 올라갔고(46→47·56→57·66→67, 43칸 이하는 불변), 불변식 6의 근거 테스트는 rate가 고정폭이 되며 공허해져 `bar_width_is_stable_as_the_eta_text_changes`로 옮겼다 |
+| C10 | **필드 값이 자릿수·단위를 바꿈** | percent·size·rate·eta가 전부 고정폭이라 뒤 필드도 **바도** 안 밀린다(ui.md 불변식 8). 폭을 넘는 값은 자르지 않고 넘친다 | 유닛 — 포매터별(`ui.rs::rate_field_is_constant_width`, `eta_field_is_constant_width`, `the_size_field_is_constant_width_while_the_total_holds`, `a_rate_too_wide_for_the_field_overflows_rather_than_truncating`, `an_eta_too_wide_for_the_field_overflows_rather_than_truncating`) + 합성 결과 둘(`eta_stays_in_one_column_as_the_numbers_change`가 80칸 footer에서 eta의 시작 열을 재고, `the_bar_does_not_move_as_the_eta_crosses_the_hour`가 8~200칸 전 폭에서 바 길이를 잰다). 부작용으로 필드 등장 경계가 올라갔다(rate 46→47은 #74, eta 56→60·바가 20으로 돌아오는 지점 66→70은 #74와 #76을 합친 값, 43칸 이하는 불변). 불변식 6의 근거 테스트는 축을 고정할 때마다 공허해져 rate → eta → **넘치는 rate**(`bar_width_is_stable_as_an_overflowing_rate_changes_width`)로 두 번 옮겼다 |
 | C9 | **footer가 터미널 최하단 행에 있음** | 2행 사이의 `\n`이 화면을 스크롤시킨다. 그래도 다음 erase는 정확히 한 줄만 되감아야 하고(안 그러면 이후 모든 쓰기가 한 줄씩 밀려 로그가 잡아먹힌다), tick 재그리기는 **스크롤을 일으키지 않아야** 한다 | 유닛 — 무한 버퍼가 아니라 **높이가 유한하고 스크롤하는 화면 모델**(`render.rs::Screen`)에 대고 검증. 로그 줄이 스크롤백+화면 통틀어 정확히 한 번씩만 나타나는지 확인 (#35) |
 
 ## D. `cp` 결과 / 종료

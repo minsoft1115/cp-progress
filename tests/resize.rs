@@ -157,13 +157,20 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
     //
     // Each stage waits for the width to *drop*, rather than for an absolute number. A footer is
     // laid out against the terminal width and then trimmed of trailing blanks, and the relationship
-    // is not proportional: 80 columns yields 61-63, 50 yields 42, 30 yields 30. Pinning those
+    // is not proportional: 80 columns yields 66-68, 50 yields 44, 30 yields 30. Pinning those
     // literals would encode three incidental numbers, so the stages compare against the width they
     // measured — hence `wide` and `mid` being learned rather than written down.
     //
-    // `DROP` separates a real relayout from the jitter of a changing ETA field, which is the 2
-    // columns of that 61-63 spread. The two real drops are 63->42 and 42->30, so 6 leaves 3x
-    // headroom over the jitter and still sits 2x under the smaller of the two drops.
+    // `DROP` separates a real relayout from the jitter within one width, which is the 2 columns of
+    // that 66-68 spread. **That jitter is the size field, not the eta.** The source here is a FIFO,
+    // so there is no total: percent reads `-- %` and the eta `--:--`, both constant, while `size`
+    // is the one field with nothing to pad itself against and it walks `256.0 KiB` (9) -> `1.0 MiB`
+    // (7) -> `10.2 MiB` (8) as the copy runs — ui.md invariant 8's one stated exception. Measured
+    // from the capture, not reasoned about: the earlier attribution to the eta was wrong before
+    // #76 fixed the eta's width and would have been doubly wrong after.
+    //
+    // The two real drops are 68->44 and 44->30, so 6 leaves 3x headroom over the jitter and still
+    // sits over 2x under the smaller of the two drops.
     const DROP: usize = 6;
     let track: [u8; 3] = [0xE2, 0x96, 0x91]; // ░ (indeterminate bar, FIFO source has no total)
     let set_cols = |cols: u16| {
