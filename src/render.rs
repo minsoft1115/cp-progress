@@ -47,17 +47,18 @@ pub struct FooterGuard<W: Write> {
     /// **The width is part of it even though the region only names rows.** A narrower terminal
     /// folds the footer that is already on screen, and the fragments land inside the scrolling
     /// region where they scroll up with the log — the residue this whole change exists to remove.
-    /// Re-arming and clearing on *any* size change is what takes them away; apt re-arms on every
-    /// SIGWINCH for the same reason (`install-progress.cc::CheckSIGWINCH`), unconditionally.
+    /// Re-arming on *any* size change is what takes them away; apt re-arms on every SIGWINCH for
+    /// the same reason (`install-progress.cc::CheckSIGWINCH`), unconditionally. How much the
+    /// re-arm then clears depends on the direction — see [`Self::arm`].
     region_for: Option<TerminalSize>,
     /// The size the region was last armed for, kept even after [`Self::release`] clears
-    /// `region_for`. It answers one question: is this arm the *first* one, or a re-arm after the
-    /// terminal changed size? Only the second blanks the screen, and only the second may — the
-    /// first arm happens when the bar appears, and a screen wiped there would take the user's
-    /// shell prompt and command with it.
+    /// `region_for`. It answers one question: did the terminal get *wider* since we last drew?
+    /// That is the only case that blanks the screen, and the only case that may — a first arm
+    /// happens when the bar appears mid-command, and a shrink costs the user a screen of `cp -v`
+    /// log to fix residue an erase from the cursor already reaches ([`Self::arm`]).
     ///
-    /// Surviving a release is what makes a resize *during* a Ctrl-Z stop count as a resize: the
-    /// region is gone by then, so `region_for` cannot say.
+    /// Surviving a release is what makes a resize *during* a Ctrl-Z stop count as one: the region
+    /// is gone by then, so `region_for` cannot say.
     last_armed_for: Option<TerminalSize>,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
@@ -161,8 +162,8 @@ impl<W: Write> FooterGuard<W> {
             return Ok(());
         }
         let bottom = size.rows - FOOTER_ROWS;
-        // A first arm and a re-arm after a resize clear different amounts — see below.
-        let resized = self.last_armed_for.is_some_and(|prev| prev != size);
+        // Three cases clear three different amounts; only the last one is expensive — see below.
+        let widened = self.last_armed_for.is_some_and(|prev| size.cols > prev.cols);
         self.region_for = Some(size);
         self.last_armed_for = Some(size);
         // **Save before setting the region.** DECSTBM homes the cursor — apt says so where it does
@@ -172,27 +173,36 @@ impl<W: Write> FooterGuard<W> {
         self.w.write_all(SAVE_CURSOR)?;
         self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())?;
         self.w.write_all(RESTORE_CURSOR)?;
-        if !resized {
-            // First arm of the run. The cursor is back where the log left off, and everything
+        if !widened {
+            // **The cheap case, and it covers everything except a widening.**
+            //
+            // *First arm of the run*: the cursor is back where the log left off, and everything
             // below it is ours by construction — the footer is always written after the log — so
             // this reserves the footer's area and touches nothing the user has on screen. It must
             // stay this narrow: the bar appears mid-command, and a screen cleared here would take
             // the shell prompt and the command line with it.
+            //
+            // *A shrink*: the fold pushes the old footer's fragments **down**, into exactly the
+            // rows this erase covers. `67e20be` fixed that direction and the terminal confirmed it.
+            //
+            // *A height-only change*: no reflow happens at all, since line wrapping follows the
+            // columns. Nothing to chase.
             return self.w.write_all(ERASE_TO_END);
         }
-        // A re-arm, which only a resize produces — and there, **the whole visible screen**.
-        // Shrinking folds the footer that is on screen and pushes the fragments down, where an
-        // erase from the log's cursor reaches them. Widening does the opposite: the terminal pulls
+        // **A widening, and only a widening, needs the whole visible screen.** The terminal pulls
         // lines back out of the scrollback to fill the wider rows, and a fragment of an older
         // footer comes back *above* where the log left off, out of `CSI J`'s reach. There is no
         // arithmetic that finds it either — after a reflow, nothing on this side knows how many
         // rows anything moved (#76).
         //
-        // The cost is the visible log: a resize blanks it and the copy's remaining output scrolls
-        // in fresh. The history itself is not lost — `CSI 2 J` leaves the scrollback alone — and
-        // without `-v` there is nothing on screen to lose. ratatui reached the same answer for the
-        // same reason (`terminal/resize.rs`: "clear screen on horizontal shrink to avoid line
-        // wrapping issues").
+        // The cost is real and is why this is gated as tightly as it is: the visible log goes
+        // blank, and under `-v` that is the log the user asked for. A single large file prints one
+        // `cp -v` line and then nothing for minutes, so nothing arrives to fill the screen back in
+        // — it simply stays empty until the next file. What survives is whatever had already
+        // scrolled off, since `CSI 2 J` does not touch the scrollback the way `CSI 3 J` would;
+        // whether the rows that were *visible* at that moment get pushed into it is the terminal's
+        // choice, not ours. ratatui pays the same price for the same reason
+        // (`terminal/resize.rs`: "clear screen on horizontal shrink to avoid line wrapping issues").
         self.w.write_all(ERASE_SCREEN)
     }
 
@@ -615,14 +625,29 @@ mod tests {
         let narrower = g.w.bytes();
         assert_eq!(count(&narrower, b"\x1b[1;22r"), 1, "width-only change re-arms: {:?}", String::from_utf8_lossy(&narrower));
         assert!(
-            contains(&narrower, ERASE_SCREEN),
-            "and clears the screen, where a folded footer's fragments would be: {:?}",
+            contains(&narrower, ERASE_TO_END) && !contains(&narrower, ERASE_SCREEN),
+            "and clears from the log cursor down, where a folded footer's fragments go — a shrink \
+             must not cost the user the screen: {:?}",
             String::from_utf8_lossy(&narrower)
         );
 
         g.w.0.borrow_mut().clear();
         g.draw(&["g", "h"], TerminalSize::new(50, 30)).unwrap();
         assert_eq!(count(&g.w.bytes(), b"\x1b[1;28r"), 1, "a height change re-arms too");
+        assert!(
+            !contains(&g.w.bytes(), ERASE_SCREEN),
+            "and a height change reflows nothing, so it does not clear the screen either"
+        );
+
+        g.w.0.borrow_mut().clear();
+        g.draw(&["i", "j"], TerminalSize::new(80, 30)).unwrap();
+        let wider = g.w.bytes();
+        assert_eq!(count(&wider, b"\x1b[1;28r"), 1, "widening re-arms as well");
+        assert!(
+            contains(&wider, ERASE_SCREEN),
+            "and it is the one case that clears the screen: {:?}",
+            String::from_utf8_lossy(&wider)
+        );
         std::mem::forget(g);
     }
 
@@ -857,16 +882,65 @@ mod tests {
         // the *next* resize came along. `last_armed_for` outliving `release` is what makes the
         // difference, and nothing else needs it.
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(60, 24)).unwrap();
         g.suspend_restore().unwrap();
         g.w.0.borrow_mut().clear();
-        g.draw(&["name", "bar"], TerminalSize::new(60, 24)).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
         assert!(
             contains(&g.w.bytes(), ERASE_SCREEN),
-            "resumed at a new width, so the screen is cleared: {:?}",
+            "resumed wider, so the screen is cleared: {:?}",
             String::from_utf8_lossy(&g.w.bytes())
         );
         std::mem::forget(g);
+    }
+
+    /// Drive a guard through a size change on a `rows`-high screen, with enough log above the
+    /// footer to have scrolled, and a fragment planted on row 2 as a reflow would leave one.
+    /// Hands back the screen so the caller can say what should have survived.
+    fn resized_from_to(
+        rows: usize,
+        before: TerminalSize,
+        after: TerminalSize,
+    ) -> (SharedScreen, Vec<String>) {
+        let screen = SharedScreen::new(rows);
+        let mut g = FooterGuard::new(screen.clone());
+        for i in 1..=12 {
+            g.write_log_chunks(std::iter::once(format!("L{i}\r\n").as_bytes())).unwrap();
+        }
+        g.draw(&["name", "bar"], before).unwrap();
+        let scrollback = screen.0.borrow().scrolled_off.clone();
+        screen.0.borrow_mut().grid[2] = "…/archives/dataset.tar.zst".as_bytes().to_vec();
+        g.draw(&["name", "bar"], after).unwrap();
+        std::mem::forget(g);
+        (screen, scrollback)
+    }
+
+    #[test]
+    fn shrinking_leaves_the_visible_log_where_it_is() {
+        // The other half of the trade, and the reason the clear is not simply "on any resize".
+        //
+        // `CSI 2 J` costs the user everything on screen, and with `-v` that is the `cp` log they
+        // asked for — a single large file prints one line and then nothing for minutes, so a blank
+        // screen *stays* blank. Shrinking does not need paying for: the fold pushes the old
+        // footer's fragments **down**, where an erase from the log's cursor already reaches them,
+        // which is what `67e20be` fixed and what the terminal confirmed. Only a widening pulls a
+        // fragment back up out of the scrollback.
+        //
+        // So the whole-screen clear is gated on the columns *growing*. A row-only change does not
+        // reflow line wrapping either, and is treated the same as a shrink.
+        let (narrower, _) = resized_from_to(10, TerminalSize::new(80, 10), TerminalSize::new(60, 10));
+        let v = narrower.0.borrow().visible();
+        assert!(
+            v[..8].iter().filter(|r| !r.is_empty()).count() > 1,
+            "a shrink must not blank the log the user is reading: {v:?}"
+        );
+        assert_eq!(v[0], "L4", "the rows above the cursor are untouched: {v:?}");
+
+        let (shorter, _) = resized_from_to(10, TerminalSize::new(80, 10), TerminalSize::new(80, 8));
+        assert!(
+            shorter.0.borrow().visible()[..6].iter().any(|r| !r.is_empty()),
+            "and neither does a height-only change, which reflows nothing"
+        );
     }
 
     #[test]
@@ -884,19 +958,12 @@ mod tests {
         // placed by hand here. What this pins is only "the erase reaches above the cursor", which
         // is the property the fix turns on; whether a real terminal puts the fragment there is the
         // observation from #76 that a byte-level model cannot make either way.
-        let screen = SharedScreen::new(10);
-        let mut g = FooterGuard::new(screen.clone());
-        for i in 1..=12 {
-            g.write_log_chunks(std::iter::once(format!("L{i}\r\n").as_bytes())).unwrap();
-        }
-        g.draw(&["name", "bar"], TerminalSize::new(80, 10)).unwrap();
-        let scrollback = screen.0.borrow().scrolled_off.clone();
+        //
+        // 60 -> 80 columns, and the direction is the point: the same move the other way must
+        // *not* clear (`shrinking_leaves_the_visible_log_where_it_is`).
+        let (screen, scrollback) =
+            resized_from_to(10, TerminalSize::new(60, 10), TerminalSize::new(80, 10));
         assert!(!scrollback.is_empty(), "the log scrolled, so there is scrollback to protect");
-
-        // What the widening reflow hands back: a slice of the old footer, above the log's cursor.
-        screen.0.borrow_mut().grid[2] = "…/archives/dataset.tar.zst".as_bytes().to_vec();
-
-        g.draw(&["name", "bar"], TerminalSize::new(60, 10)).unwrap();
         let v = screen.0.borrow().visible();
         assert_eq!(v[2], "", "the fragment above the cursor is gone: {v:?}");
         assert_eq!(
@@ -910,7 +977,6 @@ mod tests {
             scrollback,
             "while the scrollback, where the log's history actually lives, is untouched"
         );
-        std::mem::forget(g);
     }
 
     #[test]

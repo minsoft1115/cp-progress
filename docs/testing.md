@@ -153,8 +153,8 @@
 
 | # | 예외 | 기대 동작 | 방식 |
 |---|---|---|---|
-| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치. 재배치는 스크롤 영역을 다시 걸고 **보이는 화면 전체를 지운다**(`ESC[2J`) — 리플로가 되돌려 놓은 옛 footer 조각은 로그 커서보다 **위**에 있을 수 있어 `ESC[J`로는 못 닿는다. 스크롤백은 안 지운다(`ESC[3J`가 아니다) | 유닛(flag) + 통합, 지우기는 `render.rs::re_arming_clears_the_rows_above_the_log_cursor_too`·`erasing_the_screen_does_not_touch_the_scrollback` |
-| C12 | **첫 arm은 화면을 지우면 안 된다** | 크기가 바뀌었을 때만 `ESC[2J`다. 첫 arm은 파일이 느린 것으로 판명된 순간, 즉 명령 실행 도중에 일어나므로 화면을 지우면 **셸 프롬프트와 사용자가 친 명령줄이 같이 날아간다.** 첫 arm은 로그 커서부터 아래로만 지운다(`ESC[J`) | 유닛 — `render.rs::the_first_arm_clears_from_the_log_cursor_and_never_the_screen`. Ctrl-Z 정지 중에 리사이즈한 경우도 재개 시 "리사이즈"로 쳐야 하므로(`last_armed_for`가 `release`보다 오래 산다) `a_resize_during_a_stop_is_still_a_resize_on_resume` |
+| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치. 재배치는 스크롤 영역을 다시 걸고, **폭이 넓어졌을 때만 보이는 화면 전체를 지운다**(`ESC[2J`) — 넓히면 리플로가 옛 footer 조각을 로그 커서보다 **위**로 되돌려 놓아 `ESC[J`로는 못 닿는다. 스크롤백은 안 지운다(`ESC[3J`가 아니다) | 유닛(flag) + 통합, 지우기는 `render.rs::re_arming_clears_the_rows_above_the_log_cursor_too`·`erasing_the_screen_does_not_touch_the_scrollback` |
+| C12 | **좁힘·높이 변경·첫 arm은 화면을 지우면 안 된다** | 지우기는 `ESC[2J`가 아니라 `ESC[J`(로그 커서부터)다. **좁힘**은 접힌 조각이 아래로 밀려 커서 아래 지우기로 닿고, **높이 변경**은 줄바꿈이 열을 따르므로 리플로가 없다. **첫 arm**은 파일이 느린 것으로 판명된 순간, 즉 명령 실행 도중에 일어나므로 화면을 지우면 **셸 프롬프트와 사용자가 친 명령줄이 같이 날아간다.** `ESC[2J`의 대가(보이던 `cp -v` 로그가 빔)를 넓힘 하나로 좁혀 놓은 것이다 | 유닛 — `render.rs::shrinking_leaves_the_visible_log_where_it_is`, `the_first_arm_clears_from_the_log_cursor_and_never_the_screen`, 방향별 대조는 `the_region_is_re_armed_whenever_the_terminal_size_changes`. Ctrl-Z 정지 중에 넓힌 경우도 재개 시 넓힘으로 쳐야 하므로(`last_armed_for`가 `release`보다 오래 산다) `a_resize_during_a_stop_is_still_a_resize_on_resume` |
 | C2 | SIGWINCH 유실/합쳐짐 | 폴백 주기로 재조회 | 유닛 |
 | C3 | 터미널이 footer보다 짧음(`height < min_log`) | footer 억제/최소, 로그 영역 보존 | 유닛(layout) |
 | C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여준다. 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
