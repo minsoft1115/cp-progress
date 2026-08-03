@@ -153,8 +153,8 @@
 
 | # | 예외 | 기대 동작 | 방식 |
 |---|---|---|---|
-| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치. 재배치는 스크롤 영역을 다시 걸고, **폭이 넓어졌을 때만 보이는 화면 전체를 지운다**(`ESC[2J`) — 넓히면 리플로가 옛 footer 조각을 로그 커서보다 **위**로 되돌려 놓아 `ESC[J`로는 못 닿는다. 스크롤백은 안 지운다(`ESC[3J`가 아니다) | 유닛(flag) + 통합, 지우기는 `render.rs::re_arming_clears_the_rows_above_the_log_cursor_too`·`erasing_the_screen_does_not_touch_the_scrollback` |
-| C12 | **좁힘·높이 변경·첫 arm은 화면을 지우면 안 된다** | 지우기는 `ESC[2J`가 아니라 `ESC[J`(로그 커서부터)다. **좁힘**은 접힌 조각이 아래로 밀려 커서 아래 지우기로 닿고, **높이 변경**은 줄바꿈이 열을 따르므로 리플로가 없다. **첫 arm**은 파일이 느린 것으로 판명된 순간, 즉 명령 실행 도중에 일어나므로 화면을 지우면 **셸 프롬프트와 사용자가 친 명령줄이 같이 날아간다.** `ESC[2J`의 대가(보이던 `cp -v` 로그가 빔)를 넓힘 하나로 좁혀 놓은 것이다 | 유닛 — `render.rs::shrinking_leaves_the_visible_log_where_it_is`, `the_first_arm_clears_from_the_log_cursor_and_never_the_screen`, 방향별 대조는 `the_region_is_re_armed_whenever_the_terminal_size_changes`. Ctrl-Z 정지 중에 넓힌 경우도 재개 시 넓힘으로 쳐야 하므로(`last_armed_for`가 `release`보다 오래 산다) `a_resize_during_a_stop_is_still_a_resize_on_resume` |
+| C1 | 바 도중 리사이즈 | SIGWINCH → 재배치. 재배치는 스크롤 영역을 다시 걸고 **로그 커서부터 화면 끝까지만** 지운다(`ESC[J`). 커서 위는 사용자 것이라 어떤 방향에서도 안 건드린다 — 넓힐 때 남는 잔상은 [F21](./exceptions.md#f21)로 수용 | 유닛(flag) + 통합, 지우기 범위는 `render.rs::no_resize_direction_blanks_what_is_already_on_screen`·`a_widening_leaves_its_residue_above_the_cursor_and_that_is_accepted` |
+| C12 | **어떤 재배치도 화면을 지우면 안 된다** | `ESC[2J`는 잔상과 함께 **셸 프롬프트·사용자가 친 명령줄·화면의 `cp -v` 로그**를 지운다. 넣었다가 실제 터미널에서 되돌렸다(한 번만 넓혀도 명령을 실행한 줄이 사라졌다). cprog는 그 바이트를 본 적이 없어 복원할 수 없으므로, 진행바를 정리하자고 터미널 이력을 파괴하지 않는다 | 유닛 — `render.rs::arming_the_region_preserves_the_log_cursor_and_clears_below_it`(어떤 arm도 `ESC[2J`를 안 낸다), `no_resize_direction_blanks_what_is_already_on_screen`(네 방향 전부) |
 | C2 | SIGWINCH 유실/합쳐짐 | 폴백 주기로 재조회 | 유닛 |
 | C3 | 터미널이 footer보다 짧음(`height < min_log`) | footer 억제/최소, 로그 영역 보존 | 유닛(layout) |
 | C4 | **아주 긴 파일명/경로** | `-v` 없이 실행하면 footer 1행이 대상 경로를 보여준다. 표시폭 기준 **앞에서 자르고** `…` | 유닛(폭 경계·CJK 포함) |
