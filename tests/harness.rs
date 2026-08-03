@@ -51,3 +51,49 @@ fn text_written_after_a_cursor_up_lands_on_that_row() {
     );
     assert!(screen.iter().any(|l| l == "second"), "row 1 is untouched: {screen:#?}");
 }
+
+/// Absolute addressing (`CUP`) — the sequence a footer pinned outside a scrolling region uses.
+///
+/// Without it the replay leaves the cursor wherever the previous write ended, so the footer lands
+/// on top of the log instead of at the row it named. That is the #60 failure in a new spelling:
+/// a screen the terminal never showed, and every assertion made on it worth less than it looks.
+#[test]
+fn absolute_addressing_puts_text_on_the_row_it_names() {
+    // Three log lines, then a footer written to rows 5 and 6 by absolute position.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"one\r\ntwo\r\nthree\r\n");
+    bytes.extend_from_slice(b"\x1b[5;1H/dst/big.iso\x1b[K");
+    bytes.extend_from_slice(b"\x1b[6;1H####  62.34 %\x1b[K");
+
+    let screen = render_screen(&bytes);
+    assert_eq!(screen.first().map(String::as_str), Some("one"), "log untouched: {screen:#?}");
+    assert_eq!(screen.get(4).map(String::as_str), Some("/dst/big.iso"), "row 5: {screen:#?}");
+    assert_eq!(screen.get(5).map(String::as_str), Some("####  62.34 %"), "row 6: {screen:#?}");
+    assert_eq!(screen.get(3).map(String::as_str), Some(""), "row 4 was skipped: {screen:#?}");
+}
+
+/// `ESC 7` / `ESC 8` (DECSC/DECRC) — save the log cursor, jump away to repaint the footer, come
+/// back. Deliberately not `CSI s` / `CSI u`: that spelling is ANSI.SYS and does not appear in
+/// terminfo, which is why apt moved off it (Debian #772521).
+#[test]
+fn a_saved_cursor_returns_to_where_the_log_left_off() {
+    // A partial log line, a footer repaint at an absolute row, then the rest of the log line.
+    let bytes = b"'a.iso' -> \x1b7\x1b[4;1Hbar\x1b[K\x1b8'b.iso'\r\n".to_vec();
+    let screen = render_screen(&bytes);
+    assert_eq!(
+        screen.first().map(String::as_str),
+        Some("'a.iso' -> 'b.iso'"),
+        "the log line continued where it was interrupted: {screen:#?}"
+    );
+    assert_eq!(screen.get(3).map(String::as_str), Some("bar"), "and the detour drew row 4: {screen:#?}");
+}
+
+/// A restore with nothing saved must not move the cursor. `FooterGuard` only ever emits `ESC 8`
+/// after its own `ESC 7`, but a replay that treated the pair as optional would hide a regression
+/// where the save is dropped and every repaint lands at the top of the screen.
+#[test]
+fn a_restore_without_a_save_leaves_the_cursor_alone() {
+    let bytes = b"one\r\ntwo\x1b8three".to_vec();
+    let screen = render_screen(&bytes);
+    assert_eq!(screen.get(1).map(String::as_str), Some("twothree"), "{screen:#?}");
+}

@@ -404,10 +404,24 @@ pub fn cprog_exec(fifo: &std::path::Path, dst: &std::path::Path) -> (CString, Ve
 /// back to one. `src/render.rs`'s `Screen` does the same thing for the unit tests; the difference
 /// is that this replay has no bottom edge and therefore does not scroll — it is reconstructing a
 /// capture, not simulating a terminal of a fixed height.
+/// Split a `CSI params final` sequence: numeric parameters, final byte, and bytes consumed.
+/// `None` when `bytes` does not start with a complete one.
+fn csi_parts(bytes: &[u8]) -> Option<(Vec<u16>, u8, usize)> {
+    let body = bytes.strip_prefix(b"\x1b[")?;
+    let end = body.iter().position(|b| b.is_ascii_alphabetic())?;
+    let params = body[..end]
+        .split(|b| *b == b';')
+        .filter(|p| !p.is_empty())
+        .map(|p| std::str::from_utf8(p).ok()?.parse().ok())
+        .collect::<Option<Vec<u16>>>()?;
+    Some((params, body[end], end + 3))
+}
+
 pub fn render_screen(bytes: &[u8]) -> Vec<String> {
     let mut rows: Vec<Vec<u8>> = vec![Vec::new()];
     let mut row = 0usize;
     let mut col = 0usize;
+    let mut saved: Option<(usize, usize)> = None;
     let mut i = 0usize;
     while i < bytes.len() {
         match bytes[i] {
@@ -434,6 +448,28 @@ pub fn render_screen(bytes: &[u8]) -> Vec<String> {
                 } else if bytes[i..].starts_with(b"\x1b[A") {
                     row = row.saturating_sub(1); // up one row, column unchanged
                     i += 3;
+                } else if bytes[i..].starts_with(b"\x1b7") {
+                    saved = Some((row, col)); // DECSC
+                    i += 2;
+                } else if bytes[i..].starts_with(b"\x1b8") {
+                    if let Some((r, c)) = saved {
+                        row = r;
+                        col = c;
+                    }
+                    i += 2;
+                    while rows.len() <= row {
+                        rows.push(Vec::new());
+                    }
+                } else if let Some((params, b'H', len)) = csi_parts(&bytes[i..]) {
+                    // CUP, 1-based. Absolute addressing is how a footer pinned outside a scrolling
+                    // region is drawn, so the replay has to follow it or the footer lands wherever
+                    // the previous write left off — the #60 failure in a new spelling.
+                    row = (*params.first().unwrap_or(&1)).max(1) as usize - 1;
+                    col = (*params.get(1).unwrap_or(&1)).max(1) as usize - 1;
+                    while rows.len() <= row {
+                        rows.push(Vec::new());
+                    }
+                    i += len;
                 } else {
                     // Skip any other CSI/escape sequence up to its final byte.
                     i += 1;
