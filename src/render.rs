@@ -149,16 +149,21 @@ impl<W: Write> FooterGuard<W> {
             return Ok(());
         }
         let bottom = size.rows - FOOTER_ROWS;
-        // Re-arm first, then clear: a terminal that dropped the region on resize gets it back, and
-        // the erase below then lands as the fixed area rather than as ordinary screen. Clearing
-        // matters even when the region survived, because a shrink folds the footer that was
-        // already drawn and leaves its tail somewhere in the footer rows.
-        self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())?;
         self.region_for = Some(size);
+        // **Save before setting the region.** DECSTBM homes the cursor — apt says so where it does
+        // the same dance (`// set scroll region (this will place the cursor in the top left)`), so
+        // saving afterwards would capture the home position and hand the log back a cursor at row
+        // 1, where the next relayed byte would start overwriting it.
         self.w.write_all(SAVE_CURSOR)?;
-        self.goto((size.rows - FOOTER_ROWS) as usize + 1)?;
-        self.w.write_all(ERASE_TO_END)?;
-        self.w.write_all(RESTORE_CURSOR)
+        self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())?;
+        self.w.write_all(RESTORE_CURSOR)?;
+        // The cursor is back where the log left off, and **everything below it is footer by
+        // construction**: reflow preserves document order and the footer is always written after
+        // the log. So this takes the old footer, the blank gap, and any fragment the terminal
+        // pushed down when it re-wrapped a footer drawn at a wider size — the residue this whole
+        // change is about — while touching no log row. No row arithmetic, no guess about whether
+        // the terminal reflowed (#76).
+        self.w.write_all(ERASE_TO_END)
     }
 
     /// Take the footer down and hand the whole screen back.
@@ -476,6 +481,36 @@ mod tests {
     }
 
     #[test]
+    fn arming_the_region_preserves_the_log_cursor_and_clears_below_it() {
+        // **DECSTBM homes the cursor.** apt's own source says so where it does the same dance:
+        // `// set scroll region (this will place the cursor in the top left)`. Setting the region
+        // before saving captures the *home* position, so the restore hands the log back a cursor
+        // at row 1 and the next relayed byte overwrites the log from the top. The save comes first.
+        //
+        // And once the restore has put the cursor back where the log left off, **everything below
+        // it is footer by construction** — reflow preserves document order, and the footer is
+        // always written after the log. So erasing to the end of the screen from there takes the
+        // old footer, the blank gap, and any fragment a resize's reflow pushed down, and touches
+        // no log row at all. That is why the clear starts from the cursor rather than from the
+        // footer's first row: it needs no row arithmetic, costs no log, and is correct whether or
+        // not the terminal reflowed (#76).
+        let out = pinned(24, &["name", "bar"]);
+        let save = find(&out, SAVE_CURSOR).expect("saves");
+        let region = find(&out, b"\x1b[1;22r").expect("sets the region");
+        let restore = find(&out, RESTORE_CURSOR).expect("restores");
+        let clear = find(&out, ERASE_TO_END).expect("clears");
+        assert!(save < region, "save before the region set: {:?}", String::from_utf8_lossy(&out));
+        assert!(region < restore, "restore after it: {:?}", String::from_utf8_lossy(&out));
+        assert!(restore < clear, "clear after the restore: {:?}", String::from_utf8_lossy(&out));
+        assert!(
+            !contains(&out[restore + RESTORE_CURSOR.len()..clear], b"H"),
+            "nothing repositions between the restore and the clear, or it is not the log's cursor \
+             the clear starts from: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
     fn the_footer_is_written_to_the_last_two_rows_by_absolute_position() {
         let out = pinned(24, &["name", "bar"]);
         assert!(contains(&out, b"\x1b[23;1Hname"), "row 23: {:?}", String::from_utf8_lossy(&out));
@@ -487,9 +522,11 @@ mod tests {
     fn drawing_the_footer_returns_the_cursor_to_the_log() {
         // The log keeps writing where it left off, so the repaint has to be bracketed. DECSC/DECRC
         // rather than `CSI s`/`CSI u`, which is ANSI.SYS and absent from terminfo (Debian #772521).
+        // The *draw's* bracket, not the one `arm` uses around setting the region — hence the
+        // search from the end. Both exist and both matter; this test is about the repaint.
         let out = pinned(24, &["name", "bar"]);
-        let save = find(&out, SAVE_CURSOR).expect("saves the cursor");
-        let restore = find(&out, RESTORE_CURSOR).expect("restores it");
+        let save = rfind(&out, SAVE_CURSOR).expect("saves the cursor");
+        let restore = rfind(&out, RESTORE_CURSOR).expect("restores it");
         assert!(save < restore, "save comes first: {:?}", String::from_utf8_lossy(&out));
         let first_move = find(&out, b"\x1b[23;1H").unwrap();
         assert!(save < first_move && first_move < restore, "the jump is inside the bracket");
@@ -636,6 +673,9 @@ mod tests {
     fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
         hay.windows(needle.len()).position(|w| w == needle)
     }
+    fn rfind(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).rposition(|w| w == needle)
+    }
     fn contains(hay: &[u8], needle: &[u8]) -> bool {
         find(hay, needle).is_some()
     }
@@ -749,8 +789,8 @@ mod tests {
         g.draw(&["F"], TerminalSize::new(80, 24)).unwrap(); // resumed
         assert_eq!(
             &buf.bytes()[mark2..],
-            b"\x1b[1;22r\x1b7\x1b[23;1H\x1b[J\x1b8\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
-            "the redraw re-arms the region, clears the footer rows, re-hides the cursor and repaints"
+            b"\x1b7\x1b[1;22r\x1b8\x1b[J\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
+            "re-arm inside a save/restore, clear from the log cursor down, then re-hide and repaint"
         );
     }
 
@@ -804,13 +844,12 @@ mod tests {
         // footer's first row and erases to the end of the screen — five writes over a writer that
         // has already failed once would panic if any of them were unwrapped.
         //
-        // Fourteen is measured, not counted: probing 0..20 puts the smallest budget that lets
-        // `draw(&["F"], TerminalSize::new(80, 24))` succeed at **12** — arming now clears the
-        // footer rows as well as setting the region, which is five writes rather than one.
-        // Fourteen therefore lets `release` land two writes before failing on the third, so `Drop`
-        // has to survive a teardown that already put bytes on the wire, and the cursor restore
-        // after it fails too.
-        let mut g = FooterGuard::new(FailAfter(14));
+        // Thirteen is measured, not counted: probing 0..20 puts the smallest budget that lets
+        // `draw(&["F"], TerminalSize::new(80, 24))` succeed at **11** — arming is four writes
+        // (save, set region, restore, clear to end of screen). Thirteen therefore lets `release`
+        // land two writes before failing on the third, so `Drop` has to survive a teardown that
+        // already put bytes on the wire, and the cursor restore after it fails too.
+        let mut g = FooterGuard::new(FailAfter(13));
         g.draw(&["F"], TerminalSize::new(80, 24)).expect("the draw must succeed, or this test is the sibling above again");
         assert!(g.region_for.is_some(), "a region is armed, so Drop has work to do");
         drop(g); // teardown over a writer that has since failed must not panic
