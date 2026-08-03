@@ -33,6 +33,9 @@ const RESTORE_CURSOR: &[u8] = b"\x1b8";
 const RELEASE_REGION: &[u8] = b"\x1b[r";
 /// Erase from the cursor to the end of the screen (`CSI J`), used to take the footer down.
 const ERASE_TO_END: &[u8] = b"\x1b[J";
+/// Erase the whole visible screen (`CSI 2 J`), used when the terminal is resized. Deliberately
+/// **not** `CSI 3 J`, which would take the scrollback with it.
+const ERASE_SCREEN: &[u8] = b"\x1b[2J";
 
 /// Owns the terminal writer and manages the footer rows, erasing them on drop.
 pub struct FooterGuard<W: Write> {
@@ -47,6 +50,15 @@ pub struct FooterGuard<W: Write> {
     /// Re-arming and clearing on *any* size change is what takes them away; apt re-arms on every
     /// SIGWINCH for the same reason (`install-progress.cc::CheckSIGWINCH`), unconditionally.
     region_for: Option<TerminalSize>,
+    /// The size the region was last armed for, kept even after [`Self::release`] clears
+    /// `region_for`. It answers one question: is this arm the *first* one, or a re-arm after the
+    /// terminal changed size? Only the second blanks the screen, and only the second may — the
+    /// first arm happens when the bar appears, and a screen wiped there would take the user's
+    /// shell prompt and command with it.
+    ///
+    /// Surviving a release is what makes a resize *during* a Ctrl-Z stop count as a resize: the
+    /// region is gone by then, so `region_for` cannot say.
+    last_armed_for: Option<TerminalSize>,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
 }
@@ -54,7 +66,7 @@ pub struct FooterGuard<W: Write> {
 impl<W: Write> FooterGuard<W> {
     /// Wrap a writer with no footer shown yet.
     pub fn new(w: W) -> Self {
-        Self { w, region_for: None, cursor_hidden: false }
+        Self { w, region_for: None, last_armed_for: None, cursor_hidden: false }
     }
 
     /// Draw the footer on the bottom [`FOOTER_ROWS`] rows of a `term_rows`-high terminal.
@@ -149,7 +161,10 @@ impl<W: Write> FooterGuard<W> {
             return Ok(());
         }
         let bottom = size.rows - FOOTER_ROWS;
+        // A first arm and a re-arm after a resize clear different amounts — see below.
+        let resized = self.last_armed_for.is_some_and(|prev| prev != size);
         self.region_for = Some(size);
+        self.last_armed_for = Some(size);
         // **Save before setting the region.** DECSTBM homes the cursor — apt says so where it does
         // the same dance (`// set scroll region (this will place the cursor in the top left)`), so
         // saving afterwards would capture the home position and hand the log back a cursor at row
@@ -157,13 +172,28 @@ impl<W: Write> FooterGuard<W> {
         self.w.write_all(SAVE_CURSOR)?;
         self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())?;
         self.w.write_all(RESTORE_CURSOR)?;
-        // The cursor is back where the log left off, and **everything below it is footer by
-        // construction**: reflow preserves document order and the footer is always written after
-        // the log. So this takes the old footer, the blank gap, and any fragment the terminal
-        // pushed down when it re-wrapped a footer drawn at a wider size — the residue this whole
-        // change is about — while touching no log row. No row arithmetic, no guess about whether
-        // the terminal reflowed (#76).
-        self.w.write_all(ERASE_TO_END)
+        if !resized {
+            // First arm of the run. The cursor is back where the log left off, and everything
+            // below it is ours by construction — the footer is always written after the log — so
+            // this reserves the footer's area and touches nothing the user has on screen. It must
+            // stay this narrow: the bar appears mid-command, and a screen cleared here would take
+            // the shell prompt and the command line with it.
+            return self.w.write_all(ERASE_TO_END);
+        }
+        // A re-arm, which only a resize produces — and there, **the whole visible screen**.
+        // Shrinking folds the footer that is on screen and pushes the fragments down, where an
+        // erase from the log's cursor reaches them. Widening does the opposite: the terminal pulls
+        // lines back out of the scrollback to fill the wider rows, and a fragment of an older
+        // footer comes back *above* where the log left off, out of `CSI J`'s reach. There is no
+        // arithmetic that finds it either — after a reflow, nothing on this side knows how many
+        // rows anything moved (#76).
+        //
+        // The cost is the visible log: a resize blanks it and the copy's remaining output scrolls
+        // in fresh. The history itself is not lost — `CSI 2 J` leaves the scrollback alone — and
+        // without `-v` there is nothing on screen to lose. ratatui reached the same answer for the
+        // same reason (`terminal/resize.rs`: "clear screen on horizontal shrink to avoid line
+        // wrapping issues").
+        self.w.write_all(ERASE_SCREEN)
     }
 
     /// Take the footer down and hand the whole screen back.
@@ -423,6 +453,27 @@ mod tests {
                                     s.row = s.region.map_or(0, |(t, _)| t);
                                     s.col = 0;
                                 }
+                                // ED. `CSI J` (equivalently `CSI 0 J`) erases from the cursor to
+                                // the end of the screen; `CSI 2 J` erases every visible row
+                                // wherever the cursor is. Neither moves the cursor and neither
+                                // touches scrollback — which is exactly the trade the second
+                                // spelling makes when the terminal is resized (docs/ui.md). Mode
+                                // 1 is not modelled because `FooterGuard` never emits it.
+                                b'J' => match params.first().copied().unwrap_or(0) {
+                                    0 => {
+                                        let (row, col) = (s.row, s.col);
+                                        s.grid[row].truncate(col);
+                                        for line in s.grid[row + 1..].iter_mut() {
+                                            line.clear();
+                                        }
+                                    }
+                                    2 => {
+                                        for line in s.grid.iter_mut() {
+                                            line.clear();
+                                        }
+                                    }
+                                    _ => {}
+                                },
                                 // CUP, 1-based and defaulting to the top-left corner.
                                 b'H' => {
                                     let row = *params.first().unwrap_or(&1);
@@ -481,19 +532,23 @@ mod tests {
     }
 
     #[test]
-    fn arming_the_region_preserves_the_log_cursor_and_clears_below_it() {
+    fn the_first_arm_clears_from_the_log_cursor_and_never_the_screen() {
         // **DECSTBM homes the cursor.** apt's own source says so where it does the same dance:
         // `// set scroll region (this will place the cursor in the top left)`. Setting the region
         // before saving captures the *home* position, so the restore hands the log back a cursor
         // at row 1 and the next relayed byte overwrites the log from the top. The save comes first.
         //
         // And once the restore has put the cursor back where the log left off, **everything below
-        // it is footer by construction** — reflow preserves document order, and the footer is
-        // always written after the log. So erasing to the end of the screen from there takes the
-        // old footer, the blank gap, and any fragment a resize's reflow pushed down, and touches
-        // no log row at all. That is why the clear starts from the cursor rather than from the
-        // footer's first row: it needs no row arithmetic, costs no log, and is correct whether or
-        // not the terminal reflowed (#76).
+        // it is footer by construction** — the footer is always written after the log. So erasing
+        // to the end of the screen from there reserves the footer's area and touches nothing else.
+        //
+        // **`CSI 2 J` is not allowed here, and that is the point of this test.** The re-arm after
+        // a resize does clear the whole screen (`re_arming_clears_the_rows_above_the_log_cursor_too`),
+        // and the obvious way to write that — an unconditional `CSI 2 J` in `arm` — also fires on
+        // the *first* arm, which happens mid-command the moment a file turns out to be slow. It
+        // would wipe the shell prompt, the command the user typed, and whatever else was on
+        // screen, for every single copy that shows a bar. Nothing above notices: the region, the
+        // cursor bracket and the footer rows are all still correct.
         let out = pinned(24, &["name", "bar"]);
         let save = find(&out, SAVE_CURSOR).expect("saves");
         let region = find(&out, b"\x1b[1;22r").expect("sets the region");
@@ -506,6 +561,11 @@ mod tests {
             !contains(&out[restore + RESTORE_CURSOR.len()..clear], b"H"),
             "nothing repositions between the restore and the clear, or it is not the log's cursor \
              the clear starts from: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(
+            !contains(&out, ERASE_SCREEN),
+            "the first arm must not blank the screen the user is looking at: {:?}",
             String::from_utf8_lossy(&out)
         );
     }
@@ -555,8 +615,8 @@ mod tests {
         let narrower = g.w.bytes();
         assert_eq!(count(&narrower, b"\x1b[1;22r"), 1, "width-only change re-arms: {:?}", String::from_utf8_lossy(&narrower));
         assert!(
-            contains(&narrower, ERASE_TO_END),
-            "and clears the footer rows, where a folded footer's tail would be: {:?}",
+            contains(&narrower, ERASE_SCREEN),
+            "and clears the screen, where a folded footer's fragments would be: {:?}",
             String::from_utf8_lossy(&narrower)
         );
 
@@ -761,6 +821,99 @@ mod tests {
     }
 
     #[test]
+    fn the_model_erases_from_the_cursor_and_erases_the_whole_screen() {
+        // The two spellings of ED, and the difference between them is the second half of #76:
+        // `CSI J` can only reach forwards from the cursor, `CSI 2 J` reaches the rows above it too.
+        // Neither moves the cursor — the write after each erase has to land where it already was.
+        let s = screen_after(4, b"\x1b[1;1HAAA\x1b[2;1HBBB\x1b[3;1HCCC\x1b[4;1HDDD\x1b[2;2H\x1b[J");
+        let v = s.0.borrow().visible();
+        assert_eq!(v[0], "AAA", "the row above the cursor is out of `CSI J`'s reach");
+        assert_eq!(v[1], "B", "the cursor's own row is cut at the cursor");
+        assert_eq!(v, vec!["AAA", "B", "", ""], "and everything below is gone: {v:?}");
+        s.clone().write_all(b"X").unwrap();
+        assert_eq!(s.0.borrow().visible()[1], "BX", "the erase did not move the cursor");
+
+        let all = screen_after(4, b"\x1b[1;1HAAA\x1b[2;1HBBB\x1b[3;1HCCC\x1b[2;2H\x1b[2J");
+        assert_eq!(all.0.borrow().visible(), vec!["", "", "", ""], "`CSI 2 J` takes every row");
+        all.clone().write_all(b"X").unwrap();
+        assert_eq!(all.0.borrow().visible()[1], " X", "and leaves the cursor alone as well");
+    }
+
+    #[test]
+    fn erasing_the_screen_does_not_touch_the_scrollback() {
+        // The cost `CSI 2 J` is chosen for, stated where it can be checked: the rows the log has
+        // already pushed off the top stay in the scrollback, so `cp -v` history survives a resize
+        // even though the visible copy of it does not (docs/ui.md).
+        let s = screen_after(3, b"A\r\nB\r\nC\r\nD\x1b[2J");
+        assert_eq!(s.0.borrow().visible(), vec!["", "", ""], "the visible screen is blank");
+        assert_eq!(s.0.borrow().scrolled_off, vec!["A"], "and the scrollback is not");
+    }
+
+    #[test]
+    fn a_resize_during_a_stop_is_still_a_resize_on_resume() {
+        // Ctrl-Z releases the region, so `region_for` is `None` by the time the user resizes the
+        // window and types `fg`. If the memory of the last size went with it, the resume would
+        // look like a first arm and the reflow residue from the resize would stay on screen until
+        // the *next* resize came along. `last_armed_for` outliving `release` is what makes the
+        // difference, and nothing else needs it.
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
+        g.suspend_restore().unwrap();
+        g.w.0.borrow_mut().clear();
+        g.draw(&["name", "bar"], TerminalSize::new(60, 24)).unwrap();
+        assert!(
+            contains(&g.w.bytes(), ERASE_SCREEN),
+            "resumed at a new width, so the screen is cleared: {:?}",
+            String::from_utf8_lossy(&g.w.bytes())
+        );
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn re_arming_clears_the_rows_above_the_log_cursor_too() {
+        // The second half of #76, and the one an erase from the cursor cannot do.
+        //
+        // Shrinking a terminal folds the footer that is on screen and pushes the fragments *down*,
+        // which is why `arm` erasing from the log cursor to the end of the screen fixed that
+        // direction. **Widening does the opposite**: the terminal pulls lines back out of the
+        // scrollback to fill the wider rows, and a fragment of the footer that was pushed off
+        // earlier comes back *above* where the log left off. `CSI J` cannot reach it. `CSI 2 J`
+        // can, so that is what a re-arm writes.
+        //
+        // The model has no reflow — it is a grid, not a terminal — so the returning fragment is
+        // placed by hand here. What this pins is only "the erase reaches above the cursor", which
+        // is the property the fix turns on; whether a real terminal puts the fragment there is the
+        // observation from #76 that a byte-level model cannot make either way.
+        let screen = SharedScreen::new(10);
+        let mut g = FooterGuard::new(screen.clone());
+        for i in 1..=12 {
+            g.write_log_chunks(std::iter::once(format!("L{i}\r\n").as_bytes())).unwrap();
+        }
+        g.draw(&["name", "bar"], TerminalSize::new(80, 10)).unwrap();
+        let scrollback = screen.0.borrow().scrolled_off.clone();
+        assert!(!scrollback.is_empty(), "the log scrolled, so there is scrollback to protect");
+
+        // What the widening reflow hands back: a slice of the old footer, above the log's cursor.
+        screen.0.borrow_mut().grid[2] = "…/archives/dataset.tar.zst".as_bytes().to_vec();
+
+        g.draw(&["name", "bar"], TerminalSize::new(60, 10)).unwrap();
+        let v = screen.0.borrow().visible();
+        assert_eq!(v[2], "", "the fragment above the cursor is gone: {v:?}");
+        assert_eq!(
+            v[..8].iter().filter(|r| !r.is_empty()).count(),
+            0,
+            "and so is every other visible log row — the cost this buys the fix with: {v:?}"
+        );
+        assert_eq!((&v[8], &v[9]), (&"name".to_string(), &"bar".to_string()), "footer redrawn");
+        assert_eq!(
+            screen.0.borrow().scrolled_off,
+            scrollback,
+            "while the scrollback, where the log's history actually lives, is untouched"
+        );
+        std::mem::forget(g);
+    }
+
+    #[test]
     fn cursor_hidden_only_once() {
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());
@@ -790,7 +943,9 @@ mod tests {
         assert_eq!(
             &buf.bytes()[mark2..],
             b"\x1b7\x1b[1;22r\x1b8\x1b[J\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
-            "re-arm inside a save/restore, clear from the log cursor down, then re-hide and repaint"
+            "re-arm inside a save/restore, clear from the log cursor down — the terminal is the \
+             same size as before the stop, so there is no reflow residue to chase and no reason \
+             to blank the screen the shell has just drawn into — then re-hide and repaint"
         );
     }
 
