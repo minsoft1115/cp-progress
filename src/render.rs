@@ -506,6 +506,64 @@ mod tests {
     }
 
     #[test]
+    fn erase_clears_the_footer_rows_and_keeps_the_region() {
+        // `erase` runs whenever the bar should go away without the run ending — between files,
+        // or while the footer is suppressed. Nothing checked that it wrote anything at all:
+        // replacing its whole body with `Ok(())` left the suite green (#76).
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["name", "bar"], 24).unwrap();
+        g.w.0.borrow_mut().clear();
+        g.erase().unwrap();
+        let out = g.w.bytes();
+        assert_eq!(
+            out,
+            b"\x1b7\x1b[23;1H\x1b[J\x1b8",
+            "clear from the footer's first row to the end of the screen, cursor bracketed: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(!contains(&out, RELEASE_REGION), "and the region stays armed");
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn erase_is_a_no_op_before_anything_is_armed() {
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.erase().unwrap();
+        assert!(g.w.bytes().is_empty(), "nothing on screen, nothing to clear");
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn a_terminal_too_short_for_a_footer_gets_nothing_at_all() {
+        // `MIN_LOG_ROWS + FOOTER_ROWS` is 4: two rows of log plus the two the footer takes. Below
+        // that there is no room to reserve, so nothing is armed and nothing is drawn — the copy
+        // just runs. `ui::render_footer` refuses at the same boundary; this is the renderer's half
+        // of it, and the boundary is exclusive on both sides.
+        for rows in [0u16, 1, 2, 3] {
+            let mut g = FooterGuard::new(SharedBuf::default());
+            g.draw(&["name", "bar"], rows).unwrap();
+            assert!(g.w.bytes().is_empty(), "{rows} rows is too short: nothing may be written");
+            assert!(g.region_rows.is_none(), "{rows} rows: no region armed");
+            std::mem::forget(g);
+        }
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["name", "bar"], 4).unwrap();
+        assert!(contains(&g.w.bytes(), b"\x1b[1;2r"), "four rows is exactly enough");
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn an_empty_row_list_draws_nothing() {
+        // The other half of the same guard. `footer_for` never returns an empty row list, but the
+        // two conditions are independent and a mutant that merges them has to fail somewhere.
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&[], 24).unwrap();
+        assert!(g.w.bytes().is_empty(), "no rows, no output");
+        assert!(g.region_rows.is_none(), "and no region armed for a footer that is not coming");
+        std::mem::forget(g);
+    }
+
+    #[test]
     fn drop_releases_the_region_and_clears_the_footer() {
         // Leave a region behind and the user's shell keeps drawing inside it. The release has to
         // be flushed before anything else writes — apt learned that one from a post-invoke hook

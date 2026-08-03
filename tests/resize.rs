@@ -248,76 +248,84 @@ fn sigwinch_relayouts_the_footer_to_the_new_width() {
 }
 
 #[test]
-fn an_unsized_terminal_is_laid_out_as_eighty_columns() {
-    // exceptions F14 (#50, #51). `openpty` without a `Winsize` leaves the terminal reporting
-    // 0×0, so `TIOCGWINSZ` gives cprog nothing to lay out against and the 80×24 initial value
-    // survives — for the whole run, not just one tick, because the query is only ever retried
-    // and never falls back to anything else.
+fn an_unsized_terminal_gets_no_footer_at_all() {
+    // exceptions F14, rewritten by #76. `openpty` without a `Winsize` leaves the terminal
+    // reporting 0x0, so `TIOCGWINSZ` gives cprog nothing to lay out against.
     //
-    // Pinned by comparison rather than by a magic number: the footer an unsized terminal gets
-    // must be exactly the footer an 80-column one gets. The 40-column case is measured too, so
-    // the test cannot pass by cprog ignoring the terminal width altogether.
-    let widths_at = |cols: u16| -> Vec<usize> {
-        let tmp = TmpDir::new(&format!("unsized{cols}"));
-        let src = tmp.0.join("src.bin");
-        let dst = tmp.0.join("dst.bin");
-        std::fs::write(&src, vec![0u8; 200 * 1024 * 1024]).unwrap();
+    // cprog used to keep its 80x24 initial value and draw anyway. That was affordable while only
+    // the *width* reached the layout: a footer laid out too wide is ugly and, below the terminal's
+    // real width, folds. It stopped being affordable when the footer moved to absolute rows inside
+    // a scrolling region — an invented height pins the region and the bar to rows that are not the
+    // bottom, so the log scrolls in the wrong area and the bar sits in the middle of the screen.
+    //
+    // So the rule is now apt's: no size, no fancy progress (`install-progress.cc` returns from
+    // `SetupTerminalScrollArea` on `nr_rows <= 1` and from `DrawStatusLine` on `size.rows < 1`).
+    // The copy itself is untouched — this is the same "when in doubt, do nothing" that every
+    // other capability check in `plan.rs` applies.
+    let tmp = TmpDir::new("unsized");
+    let src = tmp.0.join("src.bin");
+    let dst = tmp.0.join("dst.bin");
+    std::fs::write(&src, vec![0u8; 200 * 1024 * 1024]).unwrap();
 
-        // cols == 0 means "never sized": hand openpty no Winsize at all.
-        let ws = (cols != 0).then_some(Winsize {
-            ws_row: 24,
-            ws_col: cols,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        });
-        let pty = openpty_cloexec(ws.as_ref());
-        let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
-        let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let pty = openpty_cloexec(None); // never sized
+    let out_fd: OwnedFd = pty.slave.try_clone().unwrap();
+    let err_fd: OwnedFd = pty.slave.try_clone().unwrap();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
-            .arg(&src)
-            .arg(&dst)
-            .env("TERM", "xterm")
-            .env("LC_ALL", "C.UTF-8")
-            .env_remove("CI")
-            .env("CPROG_SLOW_THRESHOLD_MS", "1")
-            .env("CPROG_SAMPLE_INTERVAL_MS", "5")
-            .env("CPROG_RENDER_TICK_MS", "5")
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(out_fd))
-            .stderr(Stdio::from(err_fd))
-            .spawn()
-            .expect("spawn cprog");
-        drop(pty.slave);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_cprog"))
+        .arg(&src)
+        .arg(&dst)
+        .env("TERM", "xterm")
+        .env("LC_ALL", "C.UTF-8")
+        .env_remove("CI")
+        .env("CPROG_SLOW_THRESHOLD_MS", "1")
+        .env("CPROG_SAMPLE_INTERVAL_MS", "5")
+        .env("CPROG_RENDER_TICK_MS", "5")
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(out_fd))
+        .stderr(Stdio::from(err_fd))
+        .spawn()
+        .expect("spawn cprog");
+    drop(pty.slave);
 
-        let mut master = File::from(pty.master);
-        let mut out = Vec::new();
-        let mut buf = [0u8; 8192];
-        loop {
-            match read_retry(&mut master, &mut buf) {
-                0 => break,
-                n => out.extend_from_slice(&buf[..n]),
-            }
+    let mut master = File::from(pty.master);
+    let mut out = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        match read_retry(&mut master, &mut buf) {
+            0 => break,
+            n => out.extend_from_slice(&buf[..n]),
         }
-        assert!(child.wait().unwrap().success(), "the copy still succeeds at {cols} cols");
-        footer_widths(&out)
-    };
+    }
+    let status = child.wait().unwrap();
 
-    let unsized_max = *widths_at(0).iter().max().expect("a footer was drawn on an unsized pty");
-    let eighty_max = *widths_at(80).iter().max().expect("a footer was drawn at 80 cols");
-    let forty_max = *widths_at(40).iter().max().expect("a footer was drawn at 40 cols");
-
-    assert_eq!(
-        unsized_max, eighty_max,
-        "an unsized terminal must get the 80-column layout (F14), not a wider or narrower one"
-    );
+    assert!(status.success(), "the copy still succeeds: {status:?}");
+    assert_eq!(std::fs::read(&dst).unwrap().len(), 200 * 1024 * 1024, "and really happened");
+    let text = strip_sgr(&out);
+    assert!(!text.contains('%'), "no bar on an unsized terminal: {text:?}");
     assert!(
-        forty_max < eighty_max,
-        "control: a terminal that does report its width is laid out to it — 40 cols gave \
-         {forty_max}, 80 cols gave {eighty_max}"
+        !out.windows(3).any(|w| w == "\u{2591}".as_bytes()),
+        "and no bar glyph either: {text:?}"
     );
-    assert!(eighty_max <= 80, "and the 80-column layout still fits 80 columns");
+    assert!(!armed_a_region(&out), "and no scrolling region was ever armed: {text:?}");
 }
+
+/// Whether `out` contains a `DECSTBM` *set* (as opposed to release) — `CSI top;bottom r`.
+fn armed_a_region(out: &[u8]) -> bool {
+    let mut i = 0;
+    while let Some(rel) = out[i..].windows(2).position(|w| w == b"\x1b[") {
+        let start = i + rel;
+        let Some(f) = out[start + 2..].iter().position(|b| b.is_ascii_alphabetic()) else {
+            break;
+        };
+        let end = start + 2 + f;
+        if out[end] == b'r' && end > start + 2 {
+            return true; // parameters present -> a region was set, not released
+        }
+        i = end + 1;
+    }
+    false
+}
+
 
 #[test]
 fn a_lost_sigwinch_is_recovered_by_the_fallback_requery() {

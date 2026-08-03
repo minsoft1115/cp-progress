@@ -253,7 +253,14 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // would flush once per chunk. Every write path here ends in an explicit `flush`, so
         // buffering changes nothing about when output appears (#18).
         let mut guard = FooterGuard::new(BufWriter::new(io::stdout().lock()));
-        let mut size = TerminalSize::new(80, 24);
+        // `None` until `TIOCGWINSZ` answers once. **A footer is not drawn before that.** The
+        // scrolling region and the footer's rows are absolute positions now, so an invented height
+        // is not a slightly-wrong layout — it pins the bar to a row that is not the bottom, and
+        // the log scrolls in the wrong area around it. apt refuses to draw on the same grounds
+        // (`install-progress.cc`: `SetupTerminalScrollArea` returns on `nr_rows <= 1`, and
+        // `DrawStatusLine` on `size.rows < 1`). Until #76 the invented 80x24 was affordable
+        // because only the *width* reached the layout — F14 records why that stopped being true.
+        let mut size: Option<TerminalSize> = None;
         // Reused across iterations: `clear` keeps the outer allocation, so draining the queue
         // costs nothing extra on the path that runs once per file (#18).
         let mut batch: Vec<Vec<u8>> = Vec::new();
@@ -275,8 +282,9 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // addressing another puts it on the wrong line. It also keeps `size` out of the caller's
         // hands, which it has to be — this closure captures it mutably.
         let mut footer_this_tick = |suppressed: bool| -> (Option<Footer>, u16) {
+            let rows = size.map_or(0, |s| s.rows);
             if suppressed || lock_shared(&progress).is_none() {
-                return (None, size.rows);
+                return (None, rows);
             }
             let stale = term::should_requery_size(
                 resized.swap(false, Ordering::Relaxed),
@@ -284,10 +292,13 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 SIZE_FALLBACK,
             );
             if stale {
-                size = term::terminal_size(io::stdout()).unwrap_or(size);
+                size = term::terminal_size(io::stdout()).or(size);
                 last_size_query = Instant::now();
             }
-            (footer_now(&progress, size, style, show_name), size.rows)
+            match size {
+                Some(s) => (footer_now(&progress, s, style, show_name), s.rows),
+                None => (None, 0),
+            }
         };
         loop {
             // A caught terminating signal ends the render loop so cleanup can run.
