@@ -277,6 +277,10 @@ mod tests {
         scrolled_off: Vec<String>,
         row: usize,
         col: usize,
+        /// Scrolling region as 0-based inclusive rows, or the whole screen when unset (DECSTBM).
+        region: Option<(usize, usize)>,
+        /// Cursor stashed by `ESC 7`, returned by `ESC 8` (DECSC/DECRC).
+        saved: Option<(usize, usize)>,
     }
 
     impl Screen {
@@ -284,12 +288,29 @@ mod tests {
             Screen { rows, grid: vec![Vec::new(); rows], ..Default::default() }
         }
 
+        /// The region's 0-based inclusive bounds, defaulting to the whole screen.
+        fn bounds(&self) -> (usize, usize) {
+            self.region.unwrap_or((0, self.rows.saturating_sub(1)))
+        }
+
         fn line_feed(&mut self) {
-            if self.row + 1 < self.rows {
-                self.row += 1;
-            } else {
-                self.scrolled_off.push(text(&self.grid.remove(0)));
-                self.grid.push(Vec::new());
+            let (top, bottom) = self.bounds();
+            if self.row != bottom {
+                // Below the region as well as inside it: a plain move, clamped to the screen.
+                if self.row + 1 < self.rows {
+                    self.row += 1;
+                }
+                return;
+            }
+            let gone = self.grid.remove(top);
+            self.grid.insert(bottom, Vec::new());
+            // **Only a region starting at the top feeds scrollback.** This is not the model
+            // taking a side: alacritty grows its history under exactly that condition
+            // (`grid/mod.rs`, `if region.start == 0`), so a footer that pins the margin anywhere
+            // else loses the user's log with no way to notice. Reproducing the condition here is
+            // what lets a test fail when someone moves the margin (docs/ui.md, issue #76).
+            if top == 0 {
+                self.scrolled_off.push(text(&gone));
             }
         }
 
@@ -313,6 +334,19 @@ mod tests {
         fn all_lines(&self) -> Vec<String> {
             self.scrolled_off.iter().cloned().chain(self.visible()).collect()
         }
+    }
+
+    /// Split a `CSI params final` sequence: the numeric parameters, the final byte, and how many
+    /// bytes it occupied. `None` if `bytes` does not start with a complete one.
+    fn csi(bytes: &[u8]) -> Option<(Vec<u16>, u8, usize)> {
+        let body = bytes.strip_prefix(b"\x1b[")?;
+        let end = body.iter().position(|b| b.is_ascii_alphabetic())?;
+        let params = body[..end]
+            .split(|b| *b == b';')
+            .filter(|p| !p.is_empty())
+            .map(|p| std::str::from_utf8(p).ok()?.parse().ok())
+            .collect::<Option<Vec<u16>>>()?;
+        Some((params, body[end], end + 3))
     }
 
     fn text(line: &[u8]) -> String {
@@ -352,6 +386,42 @@ mod tests {
                         } else if rest.starts_with(b"\x1b[A") {
                             s.row = s.row.saturating_sub(1);
                             i += 3;
+                        } else if rest.starts_with(b"\x1b7") {
+                            // DECSC. Deliberately not `CSI s`: that spelling is ANSI.SYS and does
+                            // not appear in terminfo, which is why apt moved off it (Debian
+                            // #772521).
+                            s.saved = Some((s.row, s.col));
+                            i += 2;
+                        } else if rest.starts_with(b"\x1b8") {
+                            if let Some((r, c)) = s.saved {
+                                s.row = r.min(s.rows - 1);
+                                s.col = c;
+                            }
+                            i += 2;
+                        } else if let Some((params, fin, len)) = csi(rest) {
+                            match fin {
+                                // DECSTBM. No parameters resets to the whole screen.
+                                b'r' => {
+                                    s.region = match params[..] {
+                                        [t, b] if t >= 1 && b > t && (b as usize) <= s.rows => {
+                                            Some((t as usize - 1, b as usize - 1))
+                                        }
+                                        _ => None,
+                                    };
+                                    // Setting the region homes the cursor, as a real terminal does.
+                                    s.row = s.region.map_or(0, |(t, _)| t);
+                                    s.col = 0;
+                                }
+                                // CUP, 1-based and defaulting to the top-left corner.
+                                b'H' => {
+                                    let row = *params.first().unwrap_or(&1);
+                                    let col = *params.get(1).unwrap_or(&1);
+                                    s.row = (row.max(1) as usize - 1).min(s.rows - 1);
+                                    s.col = col.max(1) as usize - 1;
+                                }
+                                _ => {}
+                            }
+                            i += len;
                         } else {
                             // Cursor show/hide and anything else: skip to the final byte.
                             i += 1;
@@ -372,6 +442,83 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    // ---- the Screen model's own contract -------------------------------------------
+    //
+    // These test the *model*, not `FooterGuard`. #62 is why: `render_screen` did not understand
+    // `CSI A`, so it rebuilt a screen the terminal had never shown and every assertion made on it
+    // was worth less than it looked. A model that is about to grow scroll regions and absolute
+    // addressing has to be pinned sequence by sequence before anything is measured on it.
+
+    /// Feed `bytes` to a fresh screen of `rows` rows and hand back the screen.
+    fn screen_after(rows: usize, bytes: &[u8]) -> SharedScreen {
+        let mut s = SharedScreen::new(rows);
+        s.write_all(bytes).unwrap();
+        s
+    }
+
+    #[test]
+    fn the_model_scrolls_only_inside_the_region() {
+        // `ESC[1;3r` keeps rows 4-5 fixed: a line feed on row 3 rotates rows 1-3 and leaves the
+        // rest alone. Without region support the whole screen would scroll and the fixed rows
+        // would drift up.
+        // `\r\n`, not a bare `\n`: a line feed moves down without returning to column 0, on a
+        // real terminal and in this model alike.
+        let s = screen_after(5, b"\x1b[1;3rA\r\nB\r\nC\r\nD");
+        let v = s.0.borrow().visible();
+        assert_eq!(v[0], "B", "row 1 rotated up");
+        assert_eq!(v[1], "C");
+        assert_eq!(v[2], "D", "row 3 is the region's last row");
+        assert_eq!(v[3], "", "row 4 is outside the region and untouched");
+        assert_eq!(v[4], "");
+    }
+
+    #[test]
+    fn the_model_feeds_scrollback_only_when_the_top_margin_is_row_one() {
+        // The rule cprog's whole design rests on. alacritty only grows its history when the
+        // scrolling region starts at the top (`grid/mod.rs`: `if region.start == 0`), so a footer
+        // that pins the margin anywhere else loses the user's log silently. The model reproduces
+        // that, which is what lets a test catch a change that moves the margin (docs/ui.md).
+        let top = screen_after(5, b"\x1b[1;3rA\r\nB\r\nC\r\nD\r\nE");
+        assert_eq!(top.0.borrow().scrolled_off, vec!["A", "B"], "margin at row 1 -> scrollback");
+
+        let inset = screen_after(5, b"\x1b[2;4r\x1b[2;1HA\r\nB\r\nC\r\nD\r\nE");
+        assert!(
+            inset.0.borrow().scrolled_off.is_empty(),
+            "margin below row 1 -> the lines are gone, not scrolled back: {:?}",
+            inset.0.borrow().scrolled_off
+        );
+    }
+
+    #[test]
+    fn the_model_places_the_cursor_absolutely() {
+        // `ESC[{row};{col}H` is 1-based. This is how the footer will be drawn once it stops
+        // counting rows relative to itself.
+        let s = screen_after(4, b"\x1b[3;1HX\x1b[1;2HY");
+        let v = s.0.borrow().visible();
+        assert_eq!(v[2], "X", "row 3, column 1");
+        assert_eq!(v[0], " Y", "row 1, column 2");
+    }
+
+    #[test]
+    fn the_model_saves_and_restores_the_cursor() {
+        // `ESC 7` / `ESC 8` (DECSC/DECRC) — not `CSI s`/`CSI u`, which are ANSI.SYS and absent
+        // from terminfo (Debian #772521). The footer draw jumps away and must come back.
+        let s = screen_after(4, b"AB\x1b7\x1b[4;1HZ\x1b8C");
+        let v = s.0.borrow().visible();
+        assert_eq!(v[0], "ABC", "the write after the restore continued where it left off");
+        assert_eq!(v[3], "Z", "and the detour really wrote to row 4");
+    }
+
+    #[test]
+    fn resetting_the_region_restores_whole_screen_scrolling() {
+        // `ESC[r` with no parameters. Teardown depends on this: leave a region behind and the
+        // user's shell keeps drawing inside it.
+        let s = screen_after(3, b"\x1b[1;2r\x1b[rA\r\nB\r\nC\r\nD");
+        let v = s.0.borrow().visible();
+        assert_eq!(v, vec!["B", "C", "D"], "the whole screen scrolls again");
+        assert_eq!(s.0.borrow().scrolled_off, vec!["A"]);
     }
 
     #[test]
