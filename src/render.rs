@@ -11,6 +11,7 @@
 
 use std::io::{self, Write};
 
+use crate::term::TerminalSize;
 use crate::ui::{FOOTER_ROWS, MIN_LOG_ROWS};
 
 /// Erase from the cursor to the end of the line (`CSI K`), clearing any leftover from a
@@ -36,10 +37,16 @@ const ERASE_TO_END: &[u8] = b"\x1b[J";
 /// Owns the terminal writer and manages the footer rows, erasing them on drop.
 pub struct FooterGuard<W: Write> {
     w: W,
-    /// The terminal height the scrolling region is currently set for, or `None` when the region
-    /// has been released. Both a marker that teardown owes a `RELEASE_REGION` and the value that
-    /// says whether a resize needs the region re-armed.
-    region_rows: Option<u16>,
+    /// The terminal size the scrolling region is currently set for, or `None` when the region has
+    /// been released. Both a marker that teardown owes a `RELEASE_REGION` and the value that says
+    /// whether a resize needs the region re-armed.
+    ///
+    /// **The width is part of it even though the region only names rows.** A narrower terminal
+    /// folds the footer that is already on screen, and the fragments land inside the scrolling
+    /// region where they scroll up with the log — the residue this whole change exists to remove.
+    /// Re-arming and clearing on *any* size change is what takes them away; apt re-arms on every
+    /// SIGWINCH for the same reason (`install-progress.cc::CheckSIGWINCH`), unconditionally.
+    region_for: Option<TerminalSize>,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
 }
@@ -47,7 +54,7 @@ pub struct FooterGuard<W: Write> {
 impl<W: Write> FooterGuard<W> {
     /// Wrap a writer with no footer shown yet.
     pub fn new(w: W) -> Self {
-        Self { w, region_rows: None, cursor_hidden: false }
+        Self { w, region_for: None, cursor_hidden: false }
     }
 
     /// Draw the footer on the bottom [`FOOTER_ROWS`] rows of a `term_rows`-high terminal.
@@ -61,11 +68,12 @@ impl<W: Write> FooterGuard<W> {
     /// It is **not** released between draws — the bottom two rows stay reserved for the run, the
     /// way apt reserves them for a dpkg run, so the layout does not jump every time a file
     /// finishes.
-    pub fn draw(&mut self, rows: &[&str], term_rows: u16) -> io::Result<()> {
+    pub fn draw(&mut self, rows: &[&str], size: TerminalSize) -> io::Result<()> {
+        let term_rows = size.rows;
         if rows.is_empty() || term_rows < MIN_LOG_ROWS + FOOTER_ROWS {
             return Ok(());
         }
-        self.arm(term_rows)?;
+        self.arm(size)?;
         if !self.cursor_hidden {
             // Mark hidden before writing so a partial write is still restored on drop.
             self.cursor_hidden = true;
@@ -87,7 +95,7 @@ impl<W: Write> FooterGuard<W> {
     /// Releasing the region here would hand two rows back and take them again on the next file,
     /// making the log jump; [`Self::release`] is what teardown and job control use.
     pub fn erase(&mut self) -> io::Result<()> {
-        let Some(term_rows) = self.region_rows else {
+        let Some(term_rows) = self.region_for.map(|s| s.rows) else {
             return Ok(());
         };
         self.w.write_all(SAVE_CURSOR)?;
@@ -136,13 +144,21 @@ impl<W: Write> FooterGuard<W> {
     /// margin anywhere else throws the user's `cp -v` log away with nothing on screen to say so.
     /// foot and tmux preserve it either way, which is why this is a comment and a test rather
     /// than something a terminal would have shown us (#76).
-    fn arm(&mut self, term_rows: u16) -> io::Result<()> {
-        if self.region_rows == Some(term_rows) {
+    fn arm(&mut self, size: TerminalSize) -> io::Result<()> {
+        if self.region_for == Some(size) {
             return Ok(());
         }
-        self.region_rows = Some(term_rows);
-        let bottom = term_rows - FOOTER_ROWS;
-        self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())
+        let bottom = size.rows - FOOTER_ROWS;
+        // Re-arm first, then clear: a terminal that dropped the region on resize gets it back, and
+        // the erase below then lands as the fixed area rather than as ordinary screen. Clearing
+        // matters even when the region survived, because a shrink folds the footer that was
+        // already drawn and leaves its tail somewhere in the footer rows.
+        self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())?;
+        self.region_for = Some(size);
+        self.w.write_all(SAVE_CURSOR)?;
+        self.goto((size.rows - FOOTER_ROWS) as usize + 1)?;
+        self.w.write_all(ERASE_TO_END)?;
+        self.w.write_all(RESTORE_CURSOR)
     }
 
     /// Take the footer down and hand the whole screen back.
@@ -152,7 +168,7 @@ impl<W: Write> FooterGuard<W> {
     /// apt learned the flushing half from a post-invoke hook printing into the residue of an
     /// unflushed clear (Debian #793672).
     fn release(&mut self) -> io::Result<()> {
-        let Some(term_rows) = self.region_rows.take() else {
+        let Some(term_rows) = self.region_for.take().map(|s| s.rows) else {
             return Ok(());
         };
         self.w.write_all(SAVE_CURSOR)?;
@@ -439,7 +455,7 @@ mod tests {
     /// Draw a two-row footer on a `rows`-high screen and hand back the bytes written.
     fn pinned(rows: u16, footer: &[&str]) -> Vec<u8> {
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(footer, rows).unwrap();
+        g.draw(footer, TerminalSize::new(80, rows)).unwrap();
         let out = g.w.bytes();
         std::mem::forget(g); // no Drop bytes in the sample
         out
@@ -480,15 +496,36 @@ mod tests {
     }
 
     #[test]
-    fn the_region_is_armed_once_and_re_armed_only_when_the_height_changes() {
+    fn the_region_is_re_armed_whenever_the_terminal_size_changes() {
+        // **Including a width-only change, and that is the bug this test exists for.** The first
+        // version of this renderer re-armed only when the *height* moved, on the reasoning that
+        // the region names rows. It shipped, and the original report reproduced against it: the
+        // footer that is already on screen is as wide as the old terminal, a narrower one folds
+        // it, and the fragments land inside the scrolling region where they scroll up with the
+        // log — exactly the stack of repeated name rows in #76. Measured on a PTY: three
+        // shrink/grow rounds emitted `arm` **zero** times, because `ws_row` never changed.
+        //
+        // apt re-arms on every SIGWINCH without comparing anything
+        // (`install-progress.cc::CheckSIGWINCH`). One escape sequence is not worth being clever
+        // about.
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["a", "b"], 24).unwrap();
-        g.draw(&["c", "d"], 24).unwrap();
-        let twice = g.w.bytes();
-        assert_eq!(count(&twice, b"\x1b[1;22r"), 1, "one arm for two draws at one height");
-        g.draw(&["e", "f"], 30).unwrap();
-        let after = g.w.bytes();
-        assert_eq!(count(&after, b"\x1b[1;28r"), 1, "a new height re-arms: {:?}", String::from_utf8_lossy(&after));
+        g.draw(&["a", "b"], TerminalSize::new(80, 24)).unwrap();
+        g.draw(&["c", "d"], TerminalSize::new(80, 24)).unwrap();
+        assert_eq!(count(&g.w.bytes(), b"\x1b[1;22r"), 1, "same size, one arm");
+
+        g.w.0.borrow_mut().clear();
+        g.draw(&["e", "f"], TerminalSize::new(50, 24)).unwrap();
+        let narrower = g.w.bytes();
+        assert_eq!(count(&narrower, b"\x1b[1;22r"), 1, "width-only change re-arms: {:?}", String::from_utf8_lossy(&narrower));
+        assert!(
+            contains(&narrower, ERASE_TO_END),
+            "and clears the footer rows, where a folded footer's tail would be: {:?}",
+            String::from_utf8_lossy(&narrower)
+        );
+
+        g.w.0.borrow_mut().clear();
+        g.draw(&["g", "h"], TerminalSize::new(50, 30)).unwrap();
+        assert_eq!(count(&g.w.bytes(), b"\x1b[1;28r"), 1, "a height change re-arms too");
         std::mem::forget(g);
     }
 
@@ -497,7 +534,7 @@ mod tests {
         // The erase-then-redraw dance is gone: the footer lives outside the scrolling region, so
         // log output can never land on it and never has to be bracketed (ui.md invariant 11, C8).
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["name", "bar"], 24).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
         g.w.0.borrow_mut().clear();
         g.write_log_chunks(std::iter::once(&b"'a' -> 'b'\n"[..])).unwrap();
         let out = g.w.bytes();
@@ -511,7 +548,7 @@ mod tests {
         // or while the footer is suppressed. Nothing checked that it wrote anything at all:
         // replacing its whole body with `Ok(())` left the suite green (#76).
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["name", "bar"], 24).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
         g.w.0.borrow_mut().clear();
         g.erase().unwrap();
         let out = g.w.bytes();
@@ -541,13 +578,13 @@ mod tests {
         // of it, and the boundary is exclusive on both sides.
         for rows in [0u16, 1, 2, 3] {
             let mut g = FooterGuard::new(SharedBuf::default());
-            g.draw(&["name", "bar"], rows).unwrap();
+            g.draw(&["name", "bar"], TerminalSize::new(80, rows)).unwrap();
             assert!(g.w.bytes().is_empty(), "{rows} rows is too short: nothing may be written");
-            assert!(g.region_rows.is_none(), "{rows} rows: no region armed");
+            assert!(g.region_for.is_none(), "{rows} rows: no region armed");
             std::mem::forget(g);
         }
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["name", "bar"], 4).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 4)).unwrap();
         assert!(contains(&g.w.bytes(), b"\x1b[1;2r"), "four rows is exactly enough");
         std::mem::forget(g);
     }
@@ -557,9 +594,9 @@ mod tests {
         // The other half of the same guard. `footer_for` never returns an empty row list, but the
         // two conditions are independent and a mutant that merges them has to fail somewhere.
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&[], 24).unwrap();
+        g.draw(&[], TerminalSize::new(80, 24)).unwrap();
         assert!(g.w.bytes().is_empty(), "no rows, no output");
-        assert!(g.region_rows.is_none(), "and no region armed for a footer that is not coming");
+        assert!(g.region_for.is_none(), "and no region armed for a footer that is not coming");
         std::mem::forget(g);
     }
 
@@ -571,7 +608,7 @@ mod tests {
         let rec = SharedBuf::default();
         {
             let mut g = FooterGuard::new(rec.clone());
-            g.draw(&["name", "bar"], 24).unwrap();
+            g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
             g.w.0.borrow_mut().clear();
         }
         let out = rec.bytes();
@@ -586,12 +623,12 @@ mod tests {
         // Ctrl-Z hands the terminal back to the shell. A region left set would confine the
         // shell's own prompt to the top of the screen until cprog is resumed.
         let mut g = FooterGuard::new(SharedBuf::default());
-        g.draw(&["name", "bar"], 24).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
         g.w.0.borrow_mut().clear();
         g.suspend_restore().unwrap();
         assert!(contains(&g.w.bytes(), b"\x1b[r"), "released on suspend");
         g.w.0.borrow_mut().clear();
-        g.draw(&["name", "bar"], 24).unwrap();
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
         assert!(contains(&g.w.bytes(), b"\x1b[1;22r"), "re-armed on resume");
         std::mem::forget(g);
     }
@@ -687,9 +724,9 @@ mod tests {
     fn cursor_hidden_only_once() {
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["A"], 24).unwrap();
+        g.draw(&["A"], TerminalSize::new(80, 24)).unwrap();
         let mark = buf.bytes().len();
-        g.draw(&["B"], 24).unwrap();
+        g.draw(&["B"], TerminalSize::new(80, 24)).unwrap();
         // A redraw does not re-emit the hide sequence.
         assert!(!buf.bytes()[mark..].windows(HIDE.len()).any(|w| w == HIDE));
     }
@@ -700,7 +737,7 @@ mod tests {
         // after resume the next draw re-hides the cursor and redraws the footer.
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"], 24).unwrap(); // hide cursor + footer
+        g.draw(&["F"], TerminalSize::new(80, 24)).unwrap(); // hide cursor + footer
         let mark = buf.bytes().len();
         g.suspend_restore().unwrap();
         assert_eq!(
@@ -709,11 +746,11 @@ mod tests {
             "release the region and clear from the footer's first row, then show the cursor"
         );
         let mark2 = buf.bytes().len();
-        g.draw(&["F"], 24).unwrap(); // resumed
+        g.draw(&["F"], TerminalSize::new(80, 24)).unwrap(); // resumed
         assert_eq!(
             &buf.bytes()[mark2..],
-            b"\x1b[1;22r\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
-            "the redraw re-arms the region, re-hides the cursor and repaints"
+            b"\x1b[1;22r\x1b7\x1b[23;1H\x1b[J\x1b8\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
+            "the redraw re-arms the region, clears the footer rows, re-hides the cursor and repaints"
         );
     }
 
@@ -735,7 +772,7 @@ mod tests {
         panic::set_hook(Box::new(|_| {}));
         let r = panic::catch_unwind(AssertUnwindSafe(|| {
             let mut g = FooterGuard::new(inner);
-            g.draw(&["F"], 24).unwrap();
+            g.draw(&["F"], TerminalSize::new(80, 24)).unwrap();
             panic!("boom");
         }));
         panic::set_hook(prev);
@@ -756,7 +793,7 @@ mod tests {
         // has to survive is only the `SHOW_CURSOR` write, because `release()` returns early with
         // no region recorded and never touches the writer at all. The sibling below is the other way.
         let mut g = FooterGuard::new(FailWriter);
-        assert!(g.draw(&["F"], 24).is_err());
+        assert!(g.draw(&["F"], TerminalSize::new(80, 24)).is_err());
         drop(g); // the cursor restore over a failing writer must not panic
     }
 
@@ -767,14 +804,15 @@ mod tests {
         // footer's first row and erases to the end of the screen — five writes over a writer that
         // has already failed once would panic if any of them were unwrapped.
         //
-        // Ten is measured, not counted: probing 0..14 puts the smallest budget that lets
-        // `draw(&["F"], 24)` succeed at **8** (arm, hide, save, goto, row, erase-to-eol, restore,
-        // and a flush that needs the budget unspent). Ten therefore lets `release` land two writes
-        // before failing on the third, so `Drop` has to survive a teardown that already put bytes
-        // on the wire — and the cursor restore after it fails too.
-        let mut g = FooterGuard::new(FailAfter(10));
-        g.draw(&["F"], 24).expect("the draw must succeed, or this test is the sibling above again");
-        assert!(g.region_rows.is_some(), "a region is armed, so Drop has work to do");
+        // Fourteen is measured, not counted: probing 0..20 puts the smallest budget that lets
+        // `draw(&["F"], TerminalSize::new(80, 24))` succeed at **12** — arming now clears the
+        // footer rows as well as setting the region, which is five writes rather than one.
+        // Fourteen therefore lets `release` land two writes before failing on the third, so `Drop`
+        // has to survive a teardown that already put bytes on the wire, and the cursor restore
+        // after it fails too.
+        let mut g = FooterGuard::new(FailAfter(14));
+        g.draw(&["F"], TerminalSize::new(80, 24)).expect("the draw must succeed, or this test is the sibling above again");
+        assert!(g.region_for.is_some(), "a region is armed, so Drop has work to do");
         drop(g); // teardown over a writer that has since failed must not panic
     }
 }

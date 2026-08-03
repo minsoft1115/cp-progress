@@ -281,10 +281,10 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // because the footer is drawn at absolute rows now: laying out for one height and
         // addressing another puts it on the wrong line. It also keeps `size` out of the caller's
         // hands, which it has to be — this closure captures it mutably.
-        let mut footer_this_tick = |suppressed: bool| -> (Option<Footer>, u16) {
-            let rows = size.map_or(0, |s| s.rows);
+        let mut footer_this_tick = |suppressed: bool| -> (Option<Footer>, TerminalSize) {
+            let last = size.unwrap_or(TerminalSize::new(0, 0));
             if suppressed || lock_shared(&progress).is_none() {
-                return (None, rows);
+                return (None, last);
             }
             let stale = term::should_requery_size(
                 resized.swap(false, Ordering::Relaxed),
@@ -296,8 +296,8 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 last_size_query = Instant::now();
             }
             match size {
-                Some(s) => (footer_now(&progress, s, style, show_name), s.rows),
-                None => (None, 0),
+                Some(s) => (footer_now(&progress, s, style, show_name), s),
+                None => (None, last),
             }
         };
         loop {
@@ -343,7 +343,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                     while let Ok(more) = rx.try_recv() {
                         batch.push(more);
                     }
-                    let (footer, term_rows) = footer_this_tick(suppressed);
+                    let (footer, term_size) = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
                     // Log first, then the footer. They no longer share an area — the footer is
                     // outside the scrolling region — so this is ordering for freshness, not for
@@ -351,15 +351,15 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                     // and the bar would otherwise sit still for the whole of a big copy.
                     let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice));
                     let _ = match &footer {
-                        Some(f) => guard.draw(&f.rows(), term_rows),
+                        Some(f) => guard.draw(&f.rows(), term_size),
                         None => guard.erase(),
                     };
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let (footer, term_rows) = footer_this_tick(suppressed);
+                    let (footer, term_size) = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
                     let _ = match footer {
-                        Some(f) => guard.draw(&f.rows(), term_rows),
+                        Some(f) => guard.draw(&f.rows(), term_size),
                         None => guard.erase(),
                     };
                 }
