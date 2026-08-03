@@ -270,9 +270,13 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // nothing to draw this skips an ioctl *and* a clock read per wake-up, which is the whole
         // of the per-file cost on a copy of many small files (#18). Leaving the SIGWINCH flag set
         // when we skip is deliberate: the first draw that needs it consumes it.
-        let mut footer_this_tick = |suppressed: bool| -> Option<Footer> {
+        // Returns the footer *and the height it was laid out for*. The two travel together
+        // because the footer is drawn at absolute rows now: laying out for one height and
+        // addressing another puts it on the wrong line. It also keeps `size` out of the caller's
+        // hands, which it has to be — this closure captures it mutably.
+        let mut footer_this_tick = |suppressed: bool| -> (Option<Footer>, u16) {
             if suppressed || lock_shared(&progress).is_none() {
-                return None;
+                return (None, size.rows);
             }
             let stale = term::should_requery_size(
                 resized.swap(false, Ordering::Relaxed),
@@ -283,7 +287,7 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                 size = term::terminal_size(io::stdout()).unwrap_or(size);
                 last_size_query = Instant::now();
             }
-            footer_now(&progress, size, style, show_name)
+            (footer_now(&progress, size, style, show_name), size.rows)
         };
         loop {
             // A caught terminating signal ends the render loop so cleanup can run.
@@ -328,18 +332,23 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
                     while let Ok(more) = rx.try_recv() {
                         batch.push(more);
                     }
-                    let footer = footer_this_tick(suppressed);
+                    let (footer, term_rows) = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
-                    let rows = footer.as_ref().map(Footer::rows);
-                    let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice), rows.as_ref().map(|r| &r[..]));
+                    // Log first, then the footer. They no longer share an area — the footer is
+                    // outside the scrolling region — so this is ordering for freshness, not for
+                    // correctness: a steady stream of log bytes never lets the timeout arm run,
+                    // and the bar would otherwise sit still for the whole of a big copy.
+                    let _ = guard.write_log_chunks(batch.iter().map(Vec::as_slice));
+                    let _ = match &footer {
+                        Some(f) => guard.draw(&f.rows(), term_rows),
+                        None => guard.erase(),
+                    };
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    let footer = footer_this_tick(suppressed);
+                    let (footer, term_rows) = footer_this_tick(suppressed);
                     progress_shown |= footer.is_some();
                     let _ = match footer {
-                        // Withheld while an unterminated log line is on screen, so the periodic
-                        // redraw cannot clobber it either (#4, docs/ui.md invariant 11).
-                        Some(f) => guard.draw_unless_line_pending(&f.rows()),
+                        Some(f) => guard.draw(&f.rows(), term_rows),
                         None => guard.erase(),
                     };
                 }

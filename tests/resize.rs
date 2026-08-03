@@ -34,14 +34,36 @@ use nix::unistd::Pid;
 mod common;
 use common::{open_fifo_writer, openpty_cloexec, read_retry, strip_sgr, TmpDir};
 
-/// Visible widths of the footer redraws (each `\r`-delimited segment containing a `%`) in `data`.
+/// Visible widths of the footer redraws in `data`.
+///
+/// Each footer row is now `CUP + text + CSI K` — absolute addressing rather than a `\r`, since the
+/// footer is pinned outside the scrolling region (#76). So the segments are delimited by the
+/// cursor moves, not by carriage returns.
 fn footer_widths(data: &[u8]) -> Vec<usize> {
     use unicode_width::UnicodeWidthStr;
-    data.split(|&b| b == b'\r')
-        .map(strip_sgr)
-        .filter(|t| t.contains('%'))
-        .map(|t| UnicodeWidthStr::width(t.trim_end()))
-        .collect()
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = data[i..].windows(2).position(|w| w == b"\x1b[") {
+        let start = i + rel;
+        // A CUP is `ESC [ digits ; digits H`; anything else here is some other CSI.
+        let Some(fin) = data[start + 2..].iter().position(|b| b.is_ascii_alphabetic()) else {
+            break;
+        };
+        let end = start + 2 + fin;
+        if data[end] == b'H' {
+            let rest = &data[end + 1..];
+            let stop = rest
+                .windows(3)
+                .position(|w| w == b"\x1b[K")
+                .unwrap_or(rest.len());
+            let text = strip_sgr(&rest[..stop]);
+            if text.contains('%') {
+                out.push(UnicodeWidthStr::width(text.trim_end()));
+            }
+        }
+        i = end + 1;
+    }
+    out
 }
 
 #[test]

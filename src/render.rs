@@ -11,8 +11,8 @@
 
 use std::io::{self, Write};
 
-/// Move to column 0 (carriage return).
-const CR: &[u8] = b"\r";
+use crate::ui::{FOOTER_ROWS, MIN_LOG_ROWS};
+
 /// Erase from the cursor to the end of the line (`CSI K`), clearing any leftover from a
 /// previously longer footer.
 const ERASE_EOL: &[u8] = b"\x1b[K";
@@ -20,108 +20,107 @@ const ERASE_EOL: &[u8] = b"\x1b[K";
 /// end of the footer bar; we hide it while the footer is live and restore it on teardown.
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
-/// Move the cursor up one line (`CSI A`), used to erase a multi-row footer from the bottom up.
-const CURSOR_UP: &[u8] = b"\x1b[A";
+/// Save / restore the cursor (DECSC / DECRC). The footer is repainted at absolute rows while the
+/// log keeps its own position, so every repaint is bracketed by these.
+///
+/// Deliberately **not** `CSI s` / `CSI u`: that spelling comes from ANSI.SYS and is absent from
+/// terminfo. apt moved off it in 2014 after a census of the terminfo database found 446 entries
+/// spelling save-cursor `\E7` against a handful of everything else (Debian #772521).
+const SAVE_CURSOR: &[u8] = b"\x1b7";
+const RESTORE_CURSOR: &[u8] = b"\x1b8";
+/// Release the scrolling region, handing the whole screen back (DECSTBM with no parameters).
+const RELEASE_REGION: &[u8] = b"\x1b[r";
+/// Erase from the cursor to the end of the screen (`CSI J`), used to take the footer down.
+const ERASE_TO_END: &[u8] = b"\x1b[J";
 
 /// Owns the terminal writer and manages the footer rows, erasing them on drop.
 pub struct FooterGuard<W: Write> {
     w: W,
-    /// How many rows the footer currently occupies on screen; 0 when none is shown. The erase
-    /// path walks back exactly this far, so it has to match what `draw` last wrote.
-    shown_rows: usize,
+    /// The terminal height the scrolling region is currently set for, or `None` when the region
+    /// has been released. Both a marker that teardown owes a `RELEASE_REGION` and the value that
+    /// says whether a resize needs the region re-armed.
+    region_rows: Option<u16>,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
-    /// Whether the last log bytes written left an unterminated line on screen (docs/ui.md
-    /// invariant 11). While true the footer is withheld — see [`Self::line_pending`].
-    line_pending: bool,
 }
 
 impl<W: Write> FooterGuard<W> {
     /// Wrap a writer with no footer shown yet.
     pub fn new(w: W) -> Self {
-        Self { w, shown_rows: 0, cursor_hidden: false, line_pending: false }
+        Self { w, region_rows: None, cursor_hidden: false }
     }
 
-    /// Whether an unterminated log line is currently on screen.
+    /// Draw the footer on the bottom [`FOOTER_ROWS`] rows of a `term_rows`-high terminal.
     ///
-    /// The footer draws from column 0 (`\r`), and the next erase clears the whole line, so
-    /// drawing it over a partial line makes that log text vanish. `cp` hits this routinely:
-    /// glibc's `error()` emits one error line as four separate writes, and the relay forwards
-    /// each fragment as it arrives (it must not wait for a newline). This is tracked on the
-    /// bytes actually written to the terminal, because stdout and stderr merge on one screen.
+    /// The rows are addressed absolutely and the log's cursor is saved and restored around them,
+    /// so nothing here depends on where the previous write ended. That is the whole point: a
+    /// cursor-relative footer is invalidated by any resize, because the terminal reflows what is
+    /// already on screen and the walk-back arithmetic no longer describes it (#76).
     ///
-    /// Test-only as an accessor: production code goes through [`Self::write_log`] and
-    /// [`Self::draw_unless_line_pending`], which consult the flag themselves.
-    #[cfg(test)]
-    pub fn line_pending(&self) -> bool {
-        self.line_pending
-    }
-
-    /// Draw (or redraw in place) the footer's rows, top to bottom. Any footer already on screen
-    /// is erased first, so rows that shrink leave no residue. On the first draw the cursor is
-    /// hidden (restored on drop) so it does not blink at the end of the bar.
-    ///
-    /// Each row must already fit the terminal width. A row the terminal folds would occupy two
-    /// physical lines while [`Self::erase`] walks back over one, and every write after that lands
-    /// a line off (docs/ui.md invariant 7).
-    pub fn draw(&mut self, rows: &[&str]) -> io::Result<()> {
-        if rows.is_empty() {
-            return self.erase();
+    /// The scrolling region is armed on the first draw and re-armed when `term_rows` changes.
+    /// It is **not** released between draws — the bottom two rows stay reserved for the run, the
+    /// way apt reserves them for a dpkg run, so the layout does not jump every time a file
+    /// finishes.
+    pub fn draw(&mut self, rows: &[&str], term_rows: u16) -> io::Result<()> {
+        if rows.is_empty() || term_rows < MIN_LOG_ROWS + FOOTER_ROWS {
+            return Ok(());
         }
-        // A footer of a different height cannot be overwritten row for row, so clear it first.
-        // In practice the height is fixed for a whole run; this only guards the general case.
-        if self.shown_rows != 0 && self.shown_rows != rows.len() {
-            self.erase()?;
-        }
+        self.arm(term_rows)?;
         if !self.cursor_hidden {
             // Mark hidden before writing so a partial write is still restored on drop.
             self.cursor_hidden = true;
             self.w.write_all(HIDE_CURSOR)?;
         }
-        // Redraw in place rather than erase-then-draw: the rows would otherwise blank for an
-        // instant on every tick, and "no flicker" is the point of the erase-redraw discipline
-        // (docs/ui.md). The cursor sits on the bottom row, so walk it back up to the first.
-        for _ in 1..self.shown_rows {
-            self.w.write_all(CURSOR_UP)?;
-        }
-        // Count the rows before writing them, so a partial write is still cleaned up on drop.
-        self.shown_rows = rows.len();
-        for (i, row) in rows.iter().enumerate() {
-            if i > 0 {
-                self.w.write_all(b"\n")?;
-            }
-            self.w.write_all(CR)?;
+        self.w.write_all(SAVE_CURSOR)?;
+        let first = term_rows as usize - rows.len().min(FOOTER_ROWS as usize);
+        for (i, row) in rows.iter().take(FOOTER_ROWS as usize).enumerate() {
+            self.goto(first + i + 1)?;
             self.w.write_all(row.as_bytes())?;
             self.w.write_all(ERASE_EOL)?;
         }
+        self.w.write_all(RESTORE_CURSOR)?;
         self.w.flush()
     }
 
-    /// Erase the footer if one is shown; a no-op otherwise.
+    /// Blank the footer rows, leaving the region armed.
     ///
-    /// The cursor sits on the bottom row, so this clears upwards and leaves it at column 0 of the
-    /// row the footer started on — where the next log bytes belong.
+    /// Releasing the region here would hand two rows back and take them again on the next file,
+    /// making the log jump; [`Self::release`] is what teardown and job control use.
     pub fn erase(&mut self) -> io::Result<()> {
-        let rows = std::mem::take(&mut self.shown_rows);
-        if rows == 0 {
+        let Some(term_rows) = self.region_rows else {
             return Ok(());
-        }
-        for i in 0..rows {
-            if i > 0 {
-                self.w.write_all(CURSOR_UP)?;
-            }
-            self.w.write_all(CR)?;
-            self.w.write_all(ERASE_EOL)?;
+        };
+        self.w.write_all(SAVE_CURSOR)?;
+        self.goto((term_rows - FOOTER_ROWS) as usize + 1)?;
+        self.w.write_all(ERASE_TO_END)?;
+        self.w.write_all(RESTORE_CURSOR)?;
+        self.w.flush()
+    }
+
+    /// Relay log bytes. They land wherever the log left off, inside the scrolling region, and the
+    /// terminal scrolls that region for us.
+    ///
+    /// There is no erase-then-redraw and no partial-line bookkeeping: the footer is outside the
+    /// region, so log output can neither overwrite it nor be overwritten by it. Both were
+    /// necessary while the two shared one flowing area (docs/ui.md invariant 11, testing.md C8).
+    pub fn write_log_chunks<'a>(
+        &mut self,
+        chunks: impl IntoIterator<Item = &'a [u8]>,
+    ) -> io::Result<()> {
+        for chunk in chunks {
+            self.w.write_all(chunk)?;
         }
         self.w.flush()
     }
 
-    /// Restore the terminal for a job-control suspend (`SIGTSTP` / Ctrl-Z): erase the footer and
-    /// show the cursor, and reset our state to "fresh" so that after the process is resumed the
-    /// next [`draw`](Self::draw) re-hides the cursor and redraws the footer. Unlike `Drop`, the
-    /// guard keeps living across the stop.
+    /// Restore the terminal for a job-control suspend (`SIGTSTP` / Ctrl-Z): take the footer down,
+    /// release the region and show the cursor, and reset our state so the next [`draw`](Self::draw)
+    /// arms everything again. Unlike `Drop`, the guard keeps living across the stop.
+    ///
+    /// The region has to go: while cprog is stopped the shell owns the terminal, and a region left
+    /// set would confine its prompt to the top of the screen.
     pub fn suspend_restore(&mut self) -> io::Result<()> {
-        self.erase()?; // footer gone, `shown_rows` back to 0
+        self.release()?;
         if self.cursor_hidden {
             self.cursor_hidden = false;
             self.w.write_all(SHOW_CURSOR)?;
@@ -129,60 +128,56 @@ impl<W: Write> FooterGuard<W> {
         self.w.flush()
     }
 
-    /// Draw the footer unless an unterminated log line is on screen (docs/ui.md invariant 11).
-    /// This is what the render loop's idle tick should call; [`Self::draw`] stays the primitive.
-    pub fn draw_unless_line_pending(&mut self, rows: &[&str]) -> io::Result<()> {
-        if self.line_pending {
+    /// Arm the scrolling region for a `term_rows`-high terminal, if it is not already armed for
+    /// exactly that height.
+    ///
+    /// **The region starts at row 1 and that is load-bearing.** alacritty only grows its
+    /// scrollback when the region starts at the top (`grid/mod.rs`: `if region.start == 0`), so a
+    /// margin anywhere else throws the user's `cp -v` log away with nothing on screen to say so.
+    /// foot and tmux preserve it either way, which is why this is a comment and a test rather
+    /// than something a terminal would have shown us (#76).
+    fn arm(&mut self, term_rows: u16) -> io::Result<()> {
+        if self.region_rows == Some(term_rows) {
             return Ok(());
         }
-        self.draw(rows)
+        self.region_rows = Some(term_rows);
+        let bottom = term_rows - FOOTER_ROWS;
+        self.w.write_all(format!("\x1b[1;{bottom}r").as_bytes())
     }
 
-    /// Relay one run of log bytes; see [`Self::write_log_chunks`], which this defers to.
-    /// Test-only: the render loop always has a drained batch and calls the chunked form.
-    #[cfg(test)]
-    pub fn write_log(&mut self, bytes: &[u8], footer: Option<&[&str]>) -> io::Result<()> {
-        self.write_log_chunks(std::iter::once(bytes), footer)
+    /// Take the footer down and hand the whole screen back.
+    ///
+    /// Order matters: the region is released *before* the rows are cleared, so `CSI J` erases
+    /// them as ordinary screen rather than as a fixed area, and the caller's flush covers both.
+    /// apt learned the flushing half from a post-invoke hook printing into the residue of an
+    /// unflushed clear (Debian #793672).
+    fn release(&mut self) -> io::Result<()> {
+        let Some(term_rows) = self.region_rows.take() else {
+            return Ok(());
+        };
+        self.w.write_all(SAVE_CURSOR)?;
+        self.w.write_all(RELEASE_REGION)?;
+        self.goto((term_rows - FOOTER_ROWS) as usize + 1)?;
+        self.w.write_all(ERASE_TO_END)?;
+        self.w.write_all(RESTORE_CURSOR)
     }
 
-    /// Relay several drained chunks through the sole writer: erase the footer, write each chunk in
-    /// turn, then redraw the footer if one should remain (docs/testing.md C8).
-    ///
-    /// The chunks are written separately rather than concatenated first. The writer buffers, so
-    /// joining them would only add a copy and a reallocation on a path that runs once per file
-    /// during a large recursive copy.
-    ///
-    /// If the bytes do not end on a line boundary the footer is withheld, because drawing it
-    /// would overwrite the partial line and the next erase would take it off screen entirely
-    /// (docs/ui.md invariant 11). It comes back with the write that completes the line.
-    /// Taking an iterator rather than a slice keeps the caller from having to materialise one.
-    pub fn write_log_chunks<'a>(
-        &mut self,
-        chunks: impl IntoIterator<Item = &'a [u8]>,
-        footer: Option<&[&str]>,
-    ) -> io::Result<()> {
-        self.erase()?;
-        for chunk in chunks {
-            self.w.write_all(chunk)?;
-            if let Some(&last) = chunk.last() {
-                self.line_pending = last != b'\n';
-            }
-        }
-        match footer {
-            Some(rows) if !self.line_pending => self.draw(rows),
-            _ => self.w.flush(),
-        }
+    /// Move to column 1 of a 1-based screen row (`CUP`).
+    fn goto(&mut self, row: usize) -> io::Result<()> {
+        self.w.write_all(format!("\x1b[{row};1H").as_bytes())
     }
 }
 
 impl<W: Write> Drop for FooterGuard<W> {
     fn drop(&mut self) {
-        // Best-effort screen restore on every exit path; failures must not panic.
-        let _ = self.erase();
+        // Best-effort screen restore on every exit path; failures must not panic. The region goes
+        // before the cursor: a terminal left with a scrolling region set is worse than one left
+        // with a hidden cursor, because the user's shell then draws into a boxed-in screen.
+        let _ = self.release();
         if self.cursor_hidden {
             let _ = self.w.write_all(SHOW_CURSOR);
-            let _ = self.w.flush();
         }
+        let _ = self.w.flush();
     }
 }
 
@@ -228,7 +223,7 @@ mod tests {
     /// A writer that accepts `n` writes and then fails every one after that.
     ///
     /// [`FailWriter`] cannot reach the erase-on-drop path at all: it fails on the very first
-    /// write, which is `HIDE_CURSOR`, so `draw` returns before `shown_rows` is ever set and the
+    /// write, which is `HIDE_CURSOR`, so `draw` returns before anything reaches the screen and the
     /// `erase()` in `Drop` takes its `rows == 0` early return — a no-op that panics over nothing.
     /// Letting the draw succeed first is what puts a footer on screen for the drop to erase (#69).
     struct FailAfter(usize);
@@ -250,7 +245,6 @@ mod tests {
         }
     }
 
-    const ERASE: &[u8] = b"\r\x1b[K";
     const HIDE: &[u8] = b"\x1b[?25l";
     const SHOW: &[u8] = b"\x1b[?25h";
 
@@ -330,10 +324,6 @@ mod tests {
             self.grid.iter().map(|l| text(l)).collect()
         }
 
-        /// Everything the user could still read: scrollback then the visible rows.
-        fn all_lines(&self) -> Vec<String> {
-            self.scrolled_off.iter().cloned().chain(self.visible()).collect()
-        }
     }
 
     /// Split a `CSI params final` sequence: the numeric parameters, the final byte, and how many
@@ -444,6 +434,120 @@ mod tests {
         }
     }
 
+    // ---- the pinned-footer contract (#76) --------------------------------------------
+
+    /// Draw a two-row footer on a `rows`-high screen and hand back the bytes written.
+    fn pinned(rows: u16, footer: &[&str]) -> Vec<u8> {
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(footer, rows).unwrap();
+        let out = g.w.bytes();
+        std::mem::forget(g); // no Drop bytes in the sample
+        out
+    }
+
+    #[test]
+    fn the_scroll_region_starts_at_row_one() {
+        // **The single most load-bearing byte in this file.** alacritty only grows its scrollback
+        // when the region starts at the top (`grid/mod.rs`: `if region.start == 0`), so a margin
+        // anywhere else silently throws away the user's `cp -v` log. foot and tmux preserve it
+        // either way, which is exactly why this needs a test rather than a terminal (#76).
+        let out = pinned(24, &["name", "bar"]);
+        assert!(
+            contains(&out, b"\x1b[1;22r"),
+            "region must be rows 1..=22 on a 24-row terminal: {:?}",
+            String::from_utf8_lossy(&out)
+        );
+    }
+
+    #[test]
+    fn the_footer_is_written_to_the_last_two_rows_by_absolute_position() {
+        let out = pinned(24, &["name", "bar"]);
+        assert!(contains(&out, b"\x1b[23;1Hname"), "row 23: {:?}", String::from_utf8_lossy(&out));
+        assert!(contains(&out, b"\x1b[24;1Hbar"), "row 24: {:?}", String::from_utf8_lossy(&out));
+        assert!(!contains(&out, b"\x1b[A"), "nothing walks back up any more");
+    }
+
+    #[test]
+    fn drawing_the_footer_returns_the_cursor_to_the_log() {
+        // The log keeps writing where it left off, so the repaint has to be bracketed. DECSC/DECRC
+        // rather than `CSI s`/`CSI u`, which is ANSI.SYS and absent from terminfo (Debian #772521).
+        let out = pinned(24, &["name", "bar"]);
+        let save = find(&out, SAVE_CURSOR).expect("saves the cursor");
+        let restore = find(&out, RESTORE_CURSOR).expect("restores it");
+        assert!(save < restore, "save comes first: {:?}", String::from_utf8_lossy(&out));
+        let first_move = find(&out, b"\x1b[23;1H").unwrap();
+        assert!(save < first_move && first_move < restore, "the jump is inside the bracket");
+    }
+
+    #[test]
+    fn the_region_is_armed_once_and_re_armed_only_when_the_height_changes() {
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["a", "b"], 24).unwrap();
+        g.draw(&["c", "d"], 24).unwrap();
+        let twice = g.w.bytes();
+        assert_eq!(count(&twice, b"\x1b[1;22r"), 1, "one arm for two draws at one height");
+        g.draw(&["e", "f"], 30).unwrap();
+        let after = g.w.bytes();
+        assert_eq!(count(&after, b"\x1b[1;28r"), 1, "a new height re-arms: {:?}", String::from_utf8_lossy(&after));
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn log_bytes_are_written_straight_through() {
+        // The erase-then-redraw dance is gone: the footer lives outside the scrolling region, so
+        // log output can never land on it and never has to be bracketed (ui.md invariant 11, C8).
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["name", "bar"], 24).unwrap();
+        g.w.0.borrow_mut().clear();
+        g.write_log_chunks(std::iter::once(&b"'a' -> 'b'\n"[..])).unwrap();
+        let out = g.w.bytes();
+        assert_eq!(out, b"'a' -> 'b'\n", "just the bytes: {:?}", String::from_utf8_lossy(&out));
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn drop_releases_the_region_and_clears_the_footer() {
+        // Leave a region behind and the user's shell keeps drawing inside it. The release has to
+        // be flushed before anything else writes — apt learned that one from a post-invoke hook
+        // printing into the residue (Debian #793672).
+        let rec = SharedBuf::default();
+        {
+            let mut g = FooterGuard::new(rec.clone());
+            g.draw(&["name", "bar"], 24).unwrap();
+            g.w.0.borrow_mut().clear();
+        }
+        let out = rec.bytes();
+        let release = find(&out, b"\x1b[r").expect("releases the region");
+        let show = find(&out, SHOW_CURSOR).expect("restores the cursor");
+        assert!(release < show, "region first, then the cursor: {:?}", String::from_utf8_lossy(&out));
+        assert!(contains(&out, b"\x1b[23;1H"), "and clears from the footer's first row");
+    }
+
+    #[test]
+    fn suspend_restore_releases_the_region_and_the_next_draw_re_arms_it() {
+        // Ctrl-Z hands the terminal back to the shell. A region left set would confine the
+        // shell's own prompt to the top of the screen until cprog is resumed.
+        let mut g = FooterGuard::new(SharedBuf::default());
+        g.draw(&["name", "bar"], 24).unwrap();
+        g.w.0.borrow_mut().clear();
+        g.suspend_restore().unwrap();
+        assert!(contains(&g.w.bytes(), b"\x1b[r"), "released on suspend");
+        g.w.0.borrow_mut().clear();
+        g.draw(&["name", "bar"], 24).unwrap();
+        assert!(contains(&g.w.bytes(), b"\x1b[1;22r"), "re-armed on resume");
+        std::mem::forget(g);
+    }
+
+    fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+        hay.windows(needle.len()).position(|w| w == needle)
+    }
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        find(hay, needle).is_some()
+    }
+    fn count(hay: &[u8], needle: &[u8]) -> usize {
+        hay.windows(needle.len()).filter(|w| *w == needle).count()
+    }
+
     // ---- the Screen model's own contract -------------------------------------------
     //
     // These test the *model*, not `FooterGuard`. #62 is why: `render_screen` did not understand
@@ -522,160 +626,14 @@ mod tests {
     }
 
     #[test]
-    fn a_footer_at_the_bottom_row_survives_the_scroll_it_causes() {
-        // #35 / docs/testing.md C9. Once the footer reaches the last line, the `\n` between
-        // its two rows scrolls the screen — and the next erase still walks up exactly one row.
-        // Get that wrong and every following write lands a line off, silently eating log output.
-        //
-        // Four rows is the smallest terminal that gets a footer at all — `render_footer` returns
-        // `None` below `MIN_LOG_ROWS + FOOTER_ROWS`, which is 2 + 2. Six is used here because the
-        // subject is the *bottom edge*: the footer has to be pushed down to the last line by log
-        // output above it, and at four rows there is no room to do the pushing (#69 D).
-        let screen = SharedScreen::new(6);
-        let footer = ["NAME", "BAR"];
-        {
-            let mut g = FooterGuard::new(screen.clone());
-            for i in 0..6 {
-                g.write_log(format!("L{i}\n").as_bytes(), Some(&footer[..])).unwrap();
-            }
-
-            let s = screen.0.borrow();
-            assert_eq!(
-                s.visible(),
-                vec!["L2", "L3", "L4", "L5", "NAME", "BAR"],
-                "the footer holds the last two rows and the log keeps the ones above"
-            );
-            assert_eq!(s.scrolled_off, vec!["L0", "L1"], "only whole log lines scrolled off");
-        }
-
-        // Every log line is readable exactly once: none overwritten by a misplaced footer, none
-        // duplicated by a redraw landing on the wrong row.
-        let s = screen.0.borrow();
-        let lines = s.all_lines();
-        for i in 0..6 {
-            let want = format!("L{i}");
-            assert_eq!(
-                lines.iter().filter(|l| **l == want).count(),
-                1,
-                "{want} must appear exactly once in {lines:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_tick_redraw_at_the_bottom_row_does_not_scroll() {
-        // The commonest state at runtime: one big file, no new log bytes, the footer redrawn
-        // every render tick in place. At the bottom row that redraw must walk the cursor back up
-        // first — otherwise its own `\n` scrolls a log line away *per tick*, and the previous
-        // name row is left stranded above the new one.
-        let screen = SharedScreen::new(6);
-        let mut g = FooterGuard::new(screen.clone());
-        for i in 0..6 {
-            g.write_log(format!("L{i}\n").as_bytes(), Some(&["NAME", "BAR"][..])).unwrap();
-        }
-        let scrolled_before = screen.0.borrow().scrolled_off.len();
-
-        for tick in 0..3 {
-            g.draw(&[&format!("NAME{tick}"), &format!("BAR{tick}")]).unwrap();
-        }
-
-        let s = screen.0.borrow();
-        assert_eq!(
-            s.visible(),
-            vec!["L2", "L3", "L4", "L5", "NAME2", "BAR2"],
-            "three redraws replace the same two rows"
-        );
-        assert_eq!(
-            s.scrolled_off.len(),
-            scrolled_before,
-            "an in-place redraw must not scroll the log away"
-        );
-    }
-
-    #[test]
-    fn dropping_the_guard_at_the_bottom_row_clears_only_the_footer() {
-        // The same boundary on the teardown path: Drop erases two rows from the last line, and
-        // must not take the log line above the footer with it.
-        let screen = SharedScreen::new(6);
-        {
-            let mut g = FooterGuard::new(screen.clone());
-            for i in 0..6 {
-                g.write_log(format!("L{i}\n").as_bytes(), Some(&["NAME", "BAR"][..])).unwrap();
-            }
-        } // Drop erases the footer
-
-        let s = screen.0.borrow();
-        assert_eq!(
-            s.visible(),
-            vec!["L2", "L3", "L4", "L5", "", ""],
-            "footer gone, log intact"
-        );
-    }
-
-    #[test]
-    fn two_rows_are_drawn_top_down() {
-        // Row one names the file, row two is the bar. The newline between them is what puts the
-        // second row below the first; the cursor ends on the second row.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["name.iso", "BAR"]).unwrap();
-        assert_eq!(buf.bytes(), b"\x1b[?25l\rname.iso\x1b[K\n\rBAR\x1b[K");
-    }
-
-    #[test]
-    fn erasing_two_rows_walks_back_up_to_the_first() {
-        // The cursor sits on the bottom row, so the erase clears it, moves up, clears the row
-        // above, and leaves the cursor at column 0 of the first — where log bytes go next.
-        // Getting the count wrong here shifts every subsequent write by a line.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["name.iso", "BAR"]).unwrap();
-        let mark = buf.bytes().len();
-        g.erase().unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K\x1b[A\r\x1b[K");
-    }
-
-    #[test]
-    fn erase_walks_back_exactly_as_far_as_it_drew() {
-        // A one-row footer must not move the cursor up at all, or it would eat a line of log.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["only"]).unwrap();
-        let mark = buf.bytes().len();
-        g.erase().unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K", "no cursor movement for one row");
-    }
-
-    #[test]
-    fn a_redraw_replaces_both_rows_in_place() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["a", "AAAA"]).unwrap();
-        let mark = buf.bytes().len();
-        g.draw(&["b", "BB"]).unwrap();
-        // Walk up to the first row and overwrite both in place — no blanking in between.
-        assert_eq!(&buf.bytes()[mark..], b"\x1b[A\rb\x1b[K\n\rBB\x1b[K");
-    }
-
-    #[test]
     fn cursor_hidden_only_once() {
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["A"]).unwrap();
+        g.draw(&["A"], 24).unwrap();
         let mark = buf.bytes().len();
-        g.draw(&["B"]).unwrap();
+        g.draw(&["B"], 24).unwrap();
         // A redraw does not re-emit the hide sequence.
         assert!(!buf.bytes()[mark..].windows(HIDE.len()).any(|w| w == HIDE));
-    }
-
-    #[test]
-    fn redraw_overwrites_in_place() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["AAAA"]).unwrap();
-        let mark = buf.bytes().len();
-        g.draw(&["BB"]).unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\rBB\x1b[K");
     }
 
     #[test]
@@ -684,166 +642,21 @@ mod tests {
         // after resume the next draw re-hides the cursor and redraws the footer.
         let buf = SharedBuf::default();
         let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap(); // hide cursor + footer
+        g.draw(&["F"], 24).unwrap(); // hide cursor + footer
         let mark = buf.bytes().len();
         g.suspend_restore().unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K\x1b[?25h", "erase footer, then show cursor");
-        let mark2 = buf.bytes().len();
-        g.draw(&["F"]).unwrap(); // resumed
-        assert_eq!(&buf.bytes()[mark2..], b"\x1b[?25l\rF\x1b[K", "redraw re-hides + draws");
-    }
-
-    #[test]
-    fn erase_is_noop_until_shown() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.erase().unwrap();
-        assert!(buf.bytes().is_empty(), "nothing shown -> nothing erased");
-
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        g.erase().unwrap();
-        assert_eq!(&buf.bytes()[mark..], ERASE);
-        let after = buf.bytes().len();
-        g.erase().unwrap(); // already erased -> noop
-        assert_eq!(buf.bytes().len(), after);
-    }
-
-    #[test]
-    fn partial_log_line_withholds_the_footer() {
-        // #4 / docs/ui.md invariant 11: bytes not ending in a newline leave a partial line on
-        // screen. Drawing the footer would `\r` over it and the next erase would wipe it, so the
-        // footer is withheld until the line is finished.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        g.write_log(b"cp: ", Some(&["F"][..])).unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[Kcp: ", "footer withheld, partial line intact");
-        assert!(g.line_pending(), "an unterminated line is on screen");
-    }
-
-    #[test]
-    fn footer_returns_once_the_line_is_finished() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.write_log(b"cp: ", Some(&["F"][..])).unwrap();
-        assert!(g.line_pending());
-        let mark = buf.bytes().len();
-        g.write_log(b"cannot stat 'x': No such file\n", Some(&["F"][..])).unwrap();
-        assert!(!g.line_pending(), "the newline completed the line");
-        // No erase first: nothing was drawn over the partial line, so it must survive.
-        assert_eq!(&buf.bytes()[mark..], b"cannot stat 'x': No such file\n\x1b[?25l\rF\x1b[K");
-    }
-
-    #[test]
-    fn split_cp_error_survives_on_screen() {
-        // The concrete failure from #4: glibc's error() emits one line as four writes. Every
-        // fragment must still be readable afterwards.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["BAR"]).unwrap();
-        for frag in [&b"cp: "[..], b"error writing 'dst.bin'", b": No space left on device", b"\n"] {
-            g.write_log(frag, Some(&["BAR"][..])).unwrap();
-        }
-        let out = buf.bytes();
-        let text = String::from_utf8_lossy(&out);
-        assert!(
-            text.contains("cp: error writing 'dst.bin': No space left on device"),
-            "the whole error must reach the screen uninterrupted: {text:?}"
-        );
-    }
-
-    #[test]
-    fn tick_redraw_is_suppressed_while_a_line_is_pending() {
-        // The render loop's idle tick must consult `line_pending` too, otherwise the periodic
-        // redraw would clobber the partial line that write_log deliberately left alone.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.write_log(b"partial", None).unwrap();
-        assert!(g.line_pending());
-        let mark = buf.bytes().len();
-        g.draw_unless_line_pending(&["F"]).unwrap();
-        assert!(buf.bytes()[mark..].is_empty(), "no footer drawn over the partial line");
-    }
-
-    #[test]
-    fn write_log_erases_then_writes_then_redraws() {
-        // docs/testing.md C8: log bytes arrive with the footer erased, then it is redrawn.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        g.write_log(b"a -> b\n", Some(&["F"][..])).unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[Ka -> b\n\rF\x1b[K");
-    }
-
-    #[test]
-    fn drained_chunks_are_bracketed_by_one_erase_and_one_draw() {
-        // The render loop's actual path: several chunks drained from the queue go out in one
-        // pass. Relaying them one at a time would repeat erase -> write -> draw per chunk.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        let chunks: [&[u8]; 3] = [b"one\n", b"two\n", b"three\n"];
-        g.write_log_chunks(chunks, Some(&["F"][..])).unwrap();
         assert_eq!(
             &buf.bytes()[mark..],
-            b"\r\x1b[Kone\ntwo\nthree\n\rF\x1b[K",
-            "one erase, the chunks in order, one redraw"
+            b"\x1b7\x1b[r\x1b[23;1H\x1b[J\x1b8\x1b[?25h",
+            "release the region and clear from the footer's first row, then show the cursor"
         );
-    }
-
-    #[test]
-    fn line_pending_follows_the_last_chunk_of_a_batch() {
-        // #4's rule applies to the batch as a whole: what matters is whether the *last* byte
-        // written ended a line, not whether some earlier chunk did.
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        let ends_open: [&[u8]; 2] = [b"done\n", b"cp: "];
-        g.write_log_chunks(ends_open, Some(&["F"][..])).unwrap();
-        assert!(g.line_pending(), "batch ends mid-line -> footer withheld");
-        assert!(!buf.bytes().ends_with(b"F\x1b[K"), "no footer drawn over it");
-
-        let ends_closed: [&[u8]; 2] = [b"cannot stat 'x'", b": No such file\n"];
-        g.write_log_chunks(ends_closed, Some(&["F"][..])).unwrap();
-        assert!(!g.line_pending(), "the newline in the last chunk completes it");
-        assert!(buf.bytes().ends_with(b"\rF\x1b[K"), "footer returns");
-    }
-
-    #[test]
-    fn an_empty_batch_still_clears_a_stale_footer() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        g.write_log_chunks(std::iter::empty(), None).unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[K", "footer erased, nothing written");
-    }
-
-    #[test]
-    fn write_log_without_footer_just_erases_and_writes() {
-        let buf = SharedBuf::default();
-        let mut g = FooterGuard::new(buf.clone());
-        g.draw(&["F"]).unwrap();
-        let mark = buf.bytes().len();
-        g.write_log(b"x\n", None).unwrap();
-        assert_eq!(&buf.bytes()[mark..], b"\r\x1b[Kx\n");
-    }
-
-    #[test]
-    fn drop_erases_footer_and_restores_cursor() {
-        let buf = SharedBuf::default();
-        {
-            let mut g = FooterGuard::new(buf.clone());
-            g.draw(&["F"]).unwrap();
-        }
-        // Drop erases the footer, then restores the cursor (show is last).
-        let out = buf.bytes();
-        assert!(out.ends_with(SHOW), "cursor restored last: {out:?}");
-        let before_show = &out[..out.len() - SHOW.len()];
-        assert!(before_show.ends_with(ERASE), "footer erased before cursor restore");
+        let mark2 = buf.bytes().len();
+        g.draw(&["F"], 24).unwrap(); // resumed
+        assert_eq!(
+            &buf.bytes()[mark2..],
+            b"\x1b[1;22r\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
+            "the redraw re-arms the region, re-hides the cursor and repaints"
+        );
     }
 
     #[test]
@@ -864,14 +677,16 @@ mod tests {
         panic::set_hook(Box::new(|_| {}));
         let r = panic::catch_unwind(AssertUnwindSafe(|| {
             let mut g = FooterGuard::new(inner);
-            g.draw(&["F"]).unwrap();
+            g.draw(&["F"], 24).unwrap();
             panic!("boom");
         }));
         panic::set_hook(prev);
         assert!(r.is_err());
-        // Footer erased and cursor restored even while unwinding.
-        assert!(buf.bytes().ends_with(SHOW), "cursor restored during unwind");
-        assert!(buf.bytes().windows(ERASE.len()).any(|w| w == ERASE), "footer erased");
+        // Region released, footer cleared and cursor restored, all while unwinding.
+        let out = buf.bytes();
+        assert!(out.ends_with(SHOW), "cursor restored during unwind");
+        assert!(contains(&out, RELEASE_REGION), "and the region handed back");
+        assert!(contains(&out, ERASE_TO_END), "and the footer rows cleared");
     }
 
     #[test]
@@ -879,30 +694,29 @@ mod tests {
         // docs/testing.md C6: render IO failures are best-effort; they must not panic.
         //
         // This half covers the failure that arrives *before* anything is on screen: the first
-        // write is `HIDE_CURSOR`, so `draw` gives up with `shown_rows` still 0. What `Drop` then
-        // has to survive is only the `SHOW_CURSOR` write, because `erase()` returns early on
-        // `rows == 0` and never touches the writer at all. The sibling below covers the other way.
+        // write is `HIDE_CURSOR`, so `draw` gives up before anything is on screen. What `Drop` then
+        // has to survive is only the `SHOW_CURSOR` write, because `release()` returns early with
+        // no region recorded and never touches the writer at all. The sibling below is the other way.
         let mut g = FooterGuard::new(FailWriter);
-        assert!(g.draw(&["F"]).is_err());
+        assert!(g.draw(&["F"], 24).is_err());
         drop(g); // the cursor restore over a failing writer must not panic
     }
 
     #[test]
-    fn drop_never_panics_when_the_erase_itself_fails() {
+    fn drop_never_panics_when_the_teardown_itself_fails() {
         // The other half, and the one that was uncovered (#69): a footer that *is* on screen when
-        // the writer dies. Replacing `let _ = self.erase()` in `Drop` with `.unwrap()` left the
-        // whole suite green, because no test had ever reached that call with `shown_rows > 0` —
-        // the sibling above cannot, and the comment claiming it did described a run that cannot
-        // happen.
+        // the writer dies. `Drop` calls `release`, which releases the region, walks to the
+        // footer's first row and erases to the end of the screen — five writes over a writer that
+        // has already failed once would panic if any of them were unwrapped.
         //
-        // Five is the exact budget one `draw(&["F"])` needs, measured rather than counted: four
-        // writes (HIDE_CURSOR, then CR + row + ERASE_EOL for the single row) and a `flush` that
-        // requires the budget not to be spent yet. That leaves the erase to fail on its *second*
-        // write, so `Drop` has to survive an erase that already put bytes on the wire — and the
-        // cursor restore after it fails too.
-        let mut g = FooterGuard::new(FailAfter(5));
-        g.draw(&["F"]).expect("the draw must succeed, or this test is the sibling above again");
-        assert_eq!(g.shown_rows, 1, "a footer is on screen, so Drop's erase has work to do");
-        drop(g); // erase-on-drop over a writer that has since failed must not panic
+        // Ten is measured, not counted: probing 0..14 puts the smallest budget that lets
+        // `draw(&["F"], 24)` succeed at **8** (arm, hide, save, goto, row, erase-to-eol, restore,
+        // and a flush that needs the budget unspent). Ten therefore lets `release` land two writes
+        // before failing on the third, so `Drop` has to survive a teardown that already put bytes
+        // on the wire — and the cursor restore after it fails too.
+        let mut g = FooterGuard::new(FailAfter(10));
+        g.draw(&["F"], 24).expect("the draw must succeed, or this test is the sibling above again");
+        assert!(g.region_rows.is_some(), "a region is armed, so Drop has work to do");
+        drop(g); // teardown over a writer that has since failed must not panic
     }
 }

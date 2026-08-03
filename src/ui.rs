@@ -25,9 +25,9 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 /// Log rows always left visible above the footer (docs/ui.md `min_log_rows`, default 2).
-const MIN_LOG_ROWS: u16 = 2;
+pub(crate) const MIN_LOG_ROWS: u16 = 2;
 /// The footer always occupies two rows: the file name (or a blank separator) and the bar.
-const FOOTER_ROWS: u16 = 2;
+pub(crate) const FOOTER_ROWS: u16 = 2;
 /// Column separator between footer fields.
 const SEP: &str = "  ";
 /// Quantized bar widths — all divisors of 100, so each cell is a clean percent (10/5/2/1 %).
