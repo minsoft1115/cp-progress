@@ -29,6 +29,7 @@ pub(crate) mod sampler;
 pub(crate) mod progress;
 
 // Rendering.
+pub(crate) mod cursor;
 pub(crate) mod render;
 pub(crate) mod ui;
 
@@ -252,7 +253,11 @@ fn run_managed(cp_args: &[OsString], verbose_present: bool) -> Result<ExitDispos
         // Buffered on purpose: `StdoutLock` is line-buffered, so relaying several drained chunks
         // would flush once per chunk. Every write path here ends in an explicit `flush`, so
         // buffering changes nothing about when output appears (#18).
-        let mut guard = FooterGuard::new(BufWriter::new(io::stdout().lock()));
+        // `show_name` is true exactly when the user did not pass `-v` — which is also exactly when
+        // cprog relays nothing and the log region would otherwise sit empty. That is the case the
+        // footer has to follow the cursor for; with `-v` the log fills the screen itself
+        // (`render::FooterGuard::anchor`).
+        let mut guard = FooterGuard::new(BufWriter::new(io::stdout().lock()), show_name.then_some(cursor::row as fn() -> Option<u16>));
         // `None` until `TIOCGWINSZ` answers once. **A footer is not drawn before that.** The
         // scrolling region and the footer's rows are absolute positions now, so an invented height
         // is not a slightly-wrong layout — it pins the bar to a row that is not the bottom, and
@@ -726,3 +731,4 @@ mod teardown_signal_disposition {
         let _ = signal_hook::low_level::unregister(id);
     }
 }
+
