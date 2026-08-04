@@ -23,7 +23,7 @@ fn spawn_foreground_cprog(fifo: &std::path::Path, dst: &std::path::Path) -> (i32
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty_cloexec(None);
+    let pty = openpty_cloexec(Some(&nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 }));
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
     let pid = unsafe { libc::fork() };
@@ -102,7 +102,7 @@ fn ctrl_z_then_bg_does_not_redraw_footer_in_background() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty_cloexec(None);
+    let pty = openpty_cloexec(Some(&nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 }));
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
@@ -224,7 +224,7 @@ fn ctrl_z_bg_then_second_ctrl_z_fg_restores_footer() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty_cloexec(None);
+    let pty = openpty_cloexec(Some(&nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 }));
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 

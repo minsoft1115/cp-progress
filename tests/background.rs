@@ -31,7 +31,7 @@ fn backgrounded_cprog_falls_back_to_passthrough_no_tui() {
     let mut envp: Vec<*const c_char> = envp_o.iter().map(|s| s.as_ptr()).collect();
     envp.push(std::ptr::null());
 
-    let pty = openpty_cloexec(None);
+    let pty = openpty_cloexec(Some(&nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 }));
     let master_fd = pty.master.into_raw_fd();
     let slave_fd = pty.slave.into_raw_fd();
 
@@ -108,7 +108,7 @@ fn a_pty_master_on_stdout_is_not_a_foreground_terminal() {
     // Big enough that a footer would certainly have been drawn at a 1 ms threshold.
     std::fs::write(&src, vec![0u8; 256 * 1024 * 1024]).unwrap();
 
-    let pty = openpty_cloexec(None);
+    let pty = openpty_cloexec(Some(&nix::pty::Winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 }));
     let master_out: OwnedFd = pty.master.try_clone().unwrap();
     let master_err: OwnedFd = pty.master.try_clone().unwrap();
     let slave_fd = pty.slave.as_raw_fd();

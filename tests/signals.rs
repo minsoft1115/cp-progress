@@ -15,7 +15,7 @@ use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 
 mod common;
-use common::{open_fifo_writer, openpty_cloexec, read_retry, rfind, TmpDir, Watchdog};
+use common::{contains, open_fifo_writer, openpty_cloexec, read_retry, rfind, TmpDir, Watchdog};
 
 #[test]
 fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
@@ -76,15 +76,14 @@ fn sigint_during_managed_copy_cleans_footer_and_preserves_signal() {
     assert!(signaled, "footer never appeared, so the signal path was not exercised");
     // True signaled exit (not a plain 128+n code).
     assert_eq!(status.signal(), Some(Signal::SIGINT as i32), "cprog should exit signaled");
-    // Footer cleared on exit: after the last bar draw there must be a *bare* erase — `\r\x1b[K`
-    // with nothing between the carriage return and the erase-to-EOL. That is what the teardown
-    // `erase()`/Drop emits; an ordinary redraw ends `...footer-text\x1b[K`, so a plain
-    // `last_erase > last_bar` would pass even if the teardown clear were removed. This does not.
+    // Footer taken down on exit. The teardown releases the scrolling region and erases from the
+    // footer's first row to the end of the screen (#76); a redraw emits neither, so this cannot
+    // be satisfied by an ordinary repaint the way a plain "an erase appeared later" could.
     let last_bar = rfind(&out, &bar).expect("saw a bar");
     let tail = &out[last_bar + bar.len()..];
     assert!(
-        tail.windows(4).any(|w| w == b"\r\x1b[K"),
-        "footer must be cleared by a bare erase after the last bar on exit: tail={:?}",
+        contains(tail, b"\x1b[r") && contains(tail, b"\x1b[J"),
+        "footer must be taken down by a region release + erase-to-end after the last bar on exit: tail={:?}",
         String::from_utf8_lossy(tail)
     );
 }
@@ -166,15 +165,15 @@ fn sigterm_to_cprog_alone_terminates_without_hanging() {
         Some(Signal::SIGTERM as i32),
         "cprog should exit signaled with the signal it was sent, got {status:?}"
     );
-    // The footer was cleared on the way out, which is only possible if cprog *caught* SIGTERM:
-    // the default action would have killed it mid-render with the footer still on screen. A bare
-    // `\r\x1b[K` — nothing between the carriage return and the erase-to-EOL — is what the teardown
-    // emits; an ordinary redraw ends `...text\x1b[K`, so this cannot be satisfied by a redraw.
+    // The footer was taken down on the way out, which is only possible if cprog *caught* SIGTERM:
+    // the default action would have killed it mid-render with the footer still on screen and the
+    // scrolling region still set. Releasing the region and erasing to the end of the screen is
+    // what teardown emits and a redraw never does (#76).
     let last_bar = rfind(&out, "\u{2591}".as_bytes()).expect("saw an indeterminate bar");
     let tail = &out[last_bar + 3..];
     assert!(
-        tail.windows(4).any(|w| w == b"\r\x1b[K"),
-        "footer must be cleared by a bare erase after the last bar: tail={:?}",
+        contains(tail, b"\x1b[r") && contains(tail, b"\x1b[J"),
+        "footer must be taken down by a region release + erase-to-end after the last bar: tail={:?}",
         String::from_utf8_lossy(tail)
     );
 }
