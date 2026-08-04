@@ -21,6 +21,8 @@
 - [`process-model.md`](./process-model.md) — `cp` 생명주기, sole-writer 출력, 정리,
   시그널 보존 종료
 - [`dependencies.md`](./dependencies.md) — 크레이트 선정(유지보수·최소주의)
+- [`screen-ownership.md`](./screen-ownership.md) — footer가 리사이즈에 깨지는 문제의 **근본**,
+  시도별 실측, 아직 안 해본 실마리 둘, 그리고 관측 수단(‑ 이걸 못 만들어서 가장 많은 비용이 들었다)
 - [`testing.md`](./testing.md) — test-first(TDD) 전략
 - [`performance.md`](./performance.md) — 오버헤드 실측 기준선과 재는 방법(‑ 회귀 비교용)
 - [`exceptions.md`](./exceptions.md) — 예외 상황 카탈로그(시그널·Ctrl-Z·passthrough 강제·
