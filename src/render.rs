@@ -67,6 +67,9 @@ pub struct FooterGuard<W: Write> {
     /// the bottom leaves a screenful of blank rows between the user's command and the bar. With
     /// `-v` the log fills that space itself and the bottom is the right place (docs/ui.md).
     probe: Option<fn() -> Option<u16>>,
+    /// The lowest row the footer has been anchored at for a given terminal height, so a resize
+    /// cannot walk it back up the screen. See [`Self::anchor`].
+    anchor_floor: Option<(u16, u16)>,
     /// Whether we have hidden the cursor (and thus must restore it on teardown).
     cursor_hidden: bool,
 }
@@ -75,7 +78,7 @@ impl<W: Write> FooterGuard<W> {
     /// Wrap a writer with no footer shown yet. `probe` asks for the footer to follow the log's
     /// last row instead of the screen's — see the field.
     pub fn new(w: W, probe: Option<fn() -> Option<u16>>) -> Self {
-        Self { w, region_for: None, region_bottom: 0, probe, cursor_hidden: false }
+        Self { w, region_for: None, region_bottom: 0, probe, anchor_floor: None, cursor_hidden: false }
     }
 
     /// Draw the footer on the bottom [`FOOTER_ROWS`] rows of a `term_rows`-high terminal.
@@ -166,6 +169,40 @@ impl<W: Write> FooterGuard<W> {
     /// margin anywhere else throws the user's `cp -v` log away with nothing on screen to say so.
     /// foot and tmux preserve it either way, which is why this is a comment and a test rather
     /// than something a terminal would have shown us (#76).
+    /// Scroll the screen up until there are [`FOOTER_ROWS`] rows free below the cursor, then come
+    /// back to it.
+    ///
+    /// **Without this the footer lands on the user's command.** Run a copy on a screen that is
+    /// already full — no `clear` first, which is the ordinary case — and the shell leaves the
+    /// cursor on the last row. There is nowhere below it for two footer rows, so the footer takes
+    /// the two rows above instead, and the line the command was typed on is simply gone.
+    /// Reproduced in tmux: a 14-row window, thirteen lines of history, and `$ cp …` overwritten
+    /// on the first draw.
+    ///
+    /// Newlines are the only way to ask a terminal for a row — there is no "insert a line at the
+    /// bottom" — and they cost nothing when the room is already there: the cursor moves down and
+    /// `CUU` brings it straight back, with no scroll. Only a cursor within [`FOOTER_ROWS`] of the
+    /// bottom actually scrolls anything, and there the alternative is overwriting. apt emits one
+    /// for its one reserved row (`install-progress.cc`, "scroll down a bit to avoid visual glitch
+    /// when the screen area shrinks"); fzf's `makeSpace` does the same for a whole window.
+    ///
+    /// **The region has to be released first**, or the newlines scroll the region and push the log
+    /// around instead of making room below it. And the release has to be bracketed: `CSI r` is
+    /// DECSTBM too, so it homes the cursor exactly as setting a region does. Releasing it bare
+    /// hands the log position back as row 1, and the erase at the end of `arm` then takes the
+    /// whole screen — the screen model caught that, having been taught this sequence for it.
+    fn make_room(&mut self) -> io::Result<()> {
+        if self.region_for.is_some() {
+            self.w.write_all(SAVE_CURSOR)?;
+            self.w.write_all(RELEASE_REGION)?;
+            self.w.write_all(RESTORE_CURSOR)?;
+        }
+        for _ in 0..FOOTER_ROWS {
+            self.w.write_all(b"\n")?;
+        }
+        self.w.write_all(format!("\x1b[{FOOTER_ROWS}A").as_bytes())
+    }
+
     /// The region's last row: the log's own last row when that is knowable and sane, otherwise
     /// the bottom of the screen.
     ///
@@ -189,22 +226,36 @@ impl<W: Write> FooterGuard<W> {
         let Some(probe) = self.probe else {
             return bottom;
         };
-        match probe() {
-            // Clamped up rather than refused. A resize folds the footer that is on screen — it was
-            // laid out for the old width — and the fold shifts the log cursor up a row, so the
-            // answer can be row 1. Refusing it sends the layout back to the bottom of the screen
-            // and the blank gap comes back on the first resize, which is the whole complaint.
-            // Clamping costs at most one row of log area and keeps the bar where the user is
-            // looking. Two is the floor because DECSTBM wants a top strictly above its bottom.
-            Some(row) if row <= bottom => row.max(MIN_LOG_ROWS),
-            _ => bottom,
-        }
+        let Some(row) = probe() else { return bottom };
+        // Clamped up rather than refused. A resize folds the footer that is on screen — it was
+        // laid out for the old width — and the fold shifts the log cursor up a row, so the answer
+        // can be row 1. Refusing it sends the layout back to the bottom of the screen and the
+        // blank gap comes back on the first resize, which is the whole complaint. Clamping costs
+        // at most one row of log area. Two is the floor because DECSTBM wants a top strictly above
+        // its bottom.
+        //
+        // **And it may never move back up the screen at a given height.** That same one-row shift
+        // happens on *every* resize, and the footer following it climbs: measured in tmux, ten
+        // shrink/grow cycles on a full 14-row screen walked the bar from row 13 to row 4, leaving
+        // ten dead rows underneath and still going. The rows the fold pushes off the top are gone
+        // either way — nothing can scroll content back down — so the only choice is where the dead
+        // space sits. Under the bar it looks broken and unbounded; above it the bar stays where
+        // every progress UI puts it. Keyed on the height because a shorter terminal is a genuinely
+        // new layout, not the same one drifting.
+        let floor = match self.anchor_floor {
+            Some((rows, floor)) if rows == size.rows => floor,
+            _ => 0,
+        };
+        let anchor = row.max(MIN_LOG_ROWS).max(floor).min(bottom);
+        self.anchor_floor = Some((size.rows, anchor));
+        anchor
     }
 
     fn arm(&mut self, size: TerminalSize) -> io::Result<()> {
         if self.region_for == Some(size) {
             return Ok(());
         }
+        self.make_room()?;
         let bottom = self.anchor(size);
         self.region_for = Some(size);
         self.region_bottom = bottom;
@@ -499,6 +550,15 @@ mod tests {
                                         line.clear();
                                     }
                                 }
+                                // CUU with a count. `arm` walks back up after making room with
+                                // newlines, and a model that ignores the walk-back leaves the
+                                // cursor rows below where the terminal has it — every assertion
+                                // after that is answered from the wrong line (#60's shape again).
+                                b'A' => {
+                                    let n = (*params.first().unwrap_or(&1)).max(1) as usize;
+                                    let top = s.bounds().0;
+                                    s.row = s.row.saturating_sub(n).max(top);
+                                }
                                 // CUP, 1-based and defaulting to the top-left corner.
                                 b'H' => {
                                     let row = *params.first().unwrap_or(&1);
@@ -665,6 +725,42 @@ mod tests {
         let out = g.w.bytes();
         assert!(contains(&out, b"\x1b[1;2r"), "clamped to two: {:?}", String::from_utf8_lossy(&out));
         assert!(contains(&out, b"\x1b[3;1Hname"), "footer right below it");
+        std::mem::forget(g);
+    }
+
+    #[test]
+    fn the_anchor_never_walks_back_up_the_screen() {
+        // The bar climbing, measured in tmux before this: a full 14-row screen, ten shrink/grow
+        // cycles, and the bar walked from row 13 to row 4 with ten dead rows underneath — still
+        // moving. Every resize folds the footer that is on screen (it was laid out for the old
+        // width), the fold pushes a row off the top, and the cursor the footer follows comes up
+        // with it.
+        //
+        // Those rows are gone whichever way it is handled — nothing scrolls content back down — so
+        // the only question is where the dead space ends up. Under a floating bar it looks broken
+        // and grows without bound; above a bar that stays put it is where every progress UI has
+        // it. Keyed on the height, because a shorter terminal is a new layout rather than the same
+        // one drifting.
+        fn low() -> Option<u16> { Some(20) }
+        fn high() -> Option<u16> { Some(9) }
+        let mut g = FooterGuard::new(SharedBuf::default(), Some(low as fn() -> Option<u16>));
+        g.draw(&["name", "bar"], TerminalSize::new(80, 24)).unwrap();
+        assert_eq!(g.anchor_floor, Some((24, 20)), "the log reached row 20");
+
+        g.probe = Some(high); // the resize shifted the cursor up
+        g.w.0.borrow_mut().clear();
+        g.draw(&["name", "bar"], TerminalSize::new(70, 24)).unwrap();
+        let out = g.w.bytes();
+        assert!(contains(&out, b"\x1b[1;20r"), "the anchor holds: {:?}", String::from_utf8_lossy(&out));
+
+        // A different height is a different layout, and the floor does not carry across.
+        g.w.0.borrow_mut().clear();
+        g.draw(&["name", "bar"], TerminalSize::new(70, 14)).unwrap();
+        assert!(
+            contains(&g.w.bytes(), b"\x1b[1;9r"),
+            "a shorter terminal re-anchors: {:?}",
+            String::from_utf8_lossy(&g.w.bytes())
+        );
         std::mem::forget(g);
     }
 
@@ -903,6 +999,18 @@ mod tests {
     }
 
     #[test]
+    fn the_model_walks_the_cursor_back_up_by_a_count() {
+        // `CSI n A`. `arm` makes room with newlines and then walks back, and the model ignored the
+        // parameterised form — it understood `CSI A` alone. A cursor left two rows below where the
+        // terminal has it answers every later assertion from the wrong line, which is #60's shape
+        // exactly. It stops at the top rather than wrapping.
+        let s = screen_after(5, b"\x1b[1;1HA\x1b[2;1HB\x1b[3;1HC\x1b[5;1HE\x1b[3AX");
+        assert_eq!(s.0.borrow().visible()[1], "BX", "three rows up from row 5 is row 2");
+        let clamped = screen_after(4, b"\x1b[2;1H\x1b[9AX");
+        assert_eq!(clamped.0.borrow().visible()[0], "X", "and it stops at the top, not past it");
+    }
+
+    #[test]
     fn the_model_places_the_cursor_absolutely() {
         // `ESC[{row};{col}H` is 1-based. This is how the footer will be drawn once it stops
         // counting rows relative to itself.
@@ -991,7 +1099,11 @@ mod tests {
                 v[..6].iter().filter(|r| !r.is_empty()).count() > 1,
                 "resizing to {after:?} blanked the log the user is reading: {v:?}"
             );
-            assert_eq!(v[0], "L4", "the rows above the cursor are untouched: {v:?}");
+            // L6 rather than L4 because the *first* draw scrolled two lines to make room for the
+            // footer — the helper fills the screen, so the cursor starts on the last row and
+            // there is nowhere below it (`make_room`). What this asserts is that the *resize*
+            // moved nothing further.
+            assert_eq!(v[0], "L6", "the rows above the cursor are untouched: {v:?}");
         }
     }
 
@@ -1054,8 +1166,8 @@ mod tests {
         g.draw(&["F"], TerminalSize::new(80, 24)).unwrap(); // resumed
         assert_eq!(
             &buf.bytes()[mark2..],
-            b"\x1b7\x1b[1;22r\x1b8\x1b[J\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
-            "re-arm inside a save/restore, clear from the log cursor down — the terminal is the \
+            b"\n\n\x1b[2A\x1b7\x1b[1;22r\x1b8\x1b[J\x1b[?25l\x1b7\x1b[24;1HF\x1b[K\x1b8",
+            "make room for the footer, then re-arm inside a save/restore, clear from the log cursor down — the terminal is the \
              same size as before the stop, so there is no reflow residue to chase and no reason \
              to blank the screen the shell has just drawn into — then re-hide and repaint"
         );
@@ -1111,12 +1223,16 @@ mod tests {
         // footer's first row and erases to the end of the screen — five writes over a writer that
         // has already failed once would panic if any of them were unwrapped.
         //
-        // Thirteen is measured, not counted: probing 0..20 puts the smallest budget that lets
-        // `draw(&["F"], TerminalSize::new(80, 24))` succeed at **11** — arming is four writes
-        // (save, set region, restore, clear to end of screen). Thirteen therefore lets `release`
-        // land two writes before failing on the third, so `Drop` has to survive a teardown that
-        // already put bytes on the wire, and the cursor restore after it fails too.
-        let mut g = FooterGuard::new(FailAfter(13), None);
+        // Sixteen is measured, not counted: probing 11..20 puts the smallest budget that lets
+        // `draw(&["F"], TerminalSize::new(80, 24))` succeed at **14** — arming is seven writes now
+        // (two newlines and a `CUU` to make room, then save, set region, restore, clear), plus the
+        // cursor hide, the draw's own five, and the flush. Sixteen therefore lets `release` land
+        // two writes before failing on the third, so `Drop` has to survive a teardown that already
+        // put bytes on the wire, and the cursor restore after it fails too.
+        //
+        // It was thirteen against eleven before `make_room` existed; the shape of the test is what
+        // matters, and the numbers move whenever `arm` does.
+        let mut g = FooterGuard::new(FailAfter(16), None);
         g.draw(&["F"], TerminalSize::new(80, 24)).expect("the draw must succeed, or this test is the sibling above again");
         assert!(g.region_for.is_some(), "a region is armed, so Drop has work to do");
         drop(g); // teardown over a writer that has since failed must not panic
